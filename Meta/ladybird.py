@@ -1,80 +1,33 @@
 #!/usr/bin/env python3
 
+# Copyright (c) 2025, ayeteadoe <ayeteadoe@gmail.com>
+# Copyright (c) 2025, Tim Flynn <trflynn89@ladybird.org>
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
 import argparse
-import importlib.util
-import multiprocessing
 import os
 import platform
 import re
 import shutil
-import subprocess
 import sys
-import types
 
-from enum import IntEnum
 from pathlib import Path
+from typing import Optional
 
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-def import_module(module_path: Path) -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
-    if not spec or not spec.loader:
-        raise ModuleNotFoundError(f"Could not find module {module_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
-
-
-META_PATH = Path(__file__).parent
-TOOLCHAIN_PATH = META_PATH.parent / "Toolchain"
-
-BuildVcpkg = import_module(TOOLCHAIN_PATH / "BuildVcpkg.py")
-
-
-class HostArchitecture(IntEnum):
-    Unsupported = 0
-    x86_64 = 1
-    AArch64 = 2
-
-
-class HostSystem(IntEnum):
-    Unsupported = 0
-    Linux = 1
-    macOS = 2
-    Windows = 3
-
-
-class Platform:
-    def __init__(self):
-        self.system = platform.system()
-        if self.system == "Windows":
-            self.host_system = HostSystem.Windows
-        elif self.system == "Darwin":
-            self.host_system = HostSystem.macOS
-        elif self.system == "Linux":
-            self.host_system = HostSystem.Linux
-        else:
-            self.host_system = HostSystem.Unsupported
-
-        self.architecture = platform.machine().lower()
-        if self.architecture in ("x86_64", "amd64"):
-            self.host_architecture = HostArchitecture.x86_64
-        elif self.architecture in ("aarch64", "arm64"):
-            self.host_architecture = HostArchitecture.AArch64
-        else:
-            self.host_architecture = HostArchitecture.Unsupported
+from Meta.find_compiler import pick_host_compiler
+from Meta.host_platform import HostArchitecture
+from Meta.host_platform import HostSystem
+from Meta.host_platform import Platform
+from Meta.utils import run_command
+from Toolchain.BuildVcpkg import build_vcpkg
 
 
 def main():
     platform = Platform()
-
-    if platform.host_system == HostSystem.Unsupported:
-        print(f"Unsupported host system {platform.system}", file=sys.stderr)
-        sys.exit(1)
-    if platform.host_architecture == HostArchitecture.Unsupported:
-        print(f"Unsupported host architecture {platform.architecture}", file=sys.stderr)
-        sys.exit(1)
+    (default_cc, default_cxx) = platform.default_compiler()
 
     parser = argparse.ArgumentParser(description="Ladybird")
     subparsers = parser.add_subparsers(dest="command")
@@ -88,22 +41,13 @@ def main():
         ),
     )
 
-    # FIXME: Validate that the cc/cxx combination is compatible (e.g. don't allow CC=gcc and CXX=clang++)
-    # FIXME: Migrate find_compiler.sh for more explicit compiler validation
     compiler_parser = argparse.ArgumentParser(add_help=False)
-    compiler_parser.add_argument(
-        "--cc",
-        required=False,
-        default=os.environ.get("CC", "clang-cl" if platform.host_system == HostSystem.Windows else "cc"),
-    )
-    compiler_parser.add_argument(
-        "--cxx",
-        required=False,
-        default=os.environ.get("CXX", "clang-cl" if platform.host_system == HostSystem.Windows else "c++"),
-    )
+    compiler_parser.add_argument("--cc", required=False, default=default_cc)
+    compiler_parser.add_argument("--cxx", required=False, default=default_cxx)
+    compiler_parser.add_argument("--jobs", "-j", required=False)
 
     target_parser = argparse.ArgumentParser(add_help=False)
-    target_parser.add_argument("--target", required=False, default="Ladybird")
+    target_parser.add_argument("target", nargs=argparse.OPTIONAL)
 
     build_parser = subparsers.add_parser(
         "build", help="Compiles the target binaries", parents=[preset_parser, compiler_parser, target_parser]
@@ -116,7 +60,7 @@ def main():
         "test", help="Runs the unit tests on the build host", parents=[preset_parser, compiler_parser]
     )
     test_parser.add_argument(
-        "--pattern", required=False, help="Limits the tests that are ran to those that match the regex pattern"
+        "pattern", nargs=argparse.OPTIONAL, help="Limits the tests that are run to those that match the regex pattern"
     )
 
     run_parser = subparsers.add_parser(
@@ -129,25 +73,23 @@ def main():
     debug_parser = subparsers.add_parser(
         "debug",
         help="Launches the application on the build host in a gdb or lldb session",
-        parents=[preset_parser, target_parser],
+        parents=[preset_parser, compiler_parser, target_parser],
     )
-
-    debug_parser.add_argument(
-        "--debugger", required=False, default="gdb" if platform.host_system == HostSystem.Linux else "lldb"
-    )
+    debug_parser.add_argument("--debugger", required=False, default=platform.default_debugger())
     debug_parser.add_argument(
         "-cmd", action="append", required=False, default=[], help="Additional commands passed through to the debugger"
+    )
+    debug_parser.add_argument(
+        "args", nargs=argparse.REMAINDER, help="Additional arguments passed through to the build system"
     )
 
     subparsers.add_parser(
         "install", help="Installs the target binary", parents=[preset_parser, compiler_parser, target_parser]
     )
 
-    subparsers.add_parser(
-        "vcpkg", help="Ensure that dependencies are available", parents=[preset_parser, compiler_parser]
-    )
+    subparsers.add_parser("vcpkg", help="Ensure that dependencies are available", parents=[preset_parser])
 
-    subparsers.add_parser("clean", help="Cleans the build environment", parents=[preset_parser, compiler_parser])
+    subparsers.add_parser("clean", help="Cleans the build environment", parents=[preset_parser])
 
     rebuild_parser = subparsers.add_parser(
         "rebuild",
@@ -163,15 +105,7 @@ def main():
         help="Resolves the addresses in the target binary to a file:line",
         parents=[preset_parser, compiler_parser, target_parser],
     )
-    addr2line_parser.add_argument(
-        "--program",
-        required=False,
-        default=(
-            "llvm-symbolizer"
-            if platform.host_system == HostSystem.Windows
-            else "addr2line" if platform.host_system == HostSystem.Linux else "atos"
-        ),
-    )
+    addr2line_parser.add_argument("--program", required=False, default=platform.default_symbolizer())
     addr2line_parser.add_argument("addresses", nargs=argparse.REMAINDER)
 
     args = parser.parse_args()
@@ -187,12 +121,18 @@ def main():
         print("ladybird.py must be run from a Visual Studio enabled environment", file=sys.stderr)
         sys.exit(1)
 
+    if "target" in args:
+        if args.target == "ladybird":
+            args.target = "Ladybird"
+        if not args.target and args.command not in ("build", "rebuild"):
+            args.target = "Ladybird"
+
     if args.command == "build":
         build_dir = configure_main(platform, args.preset, args.cc, args.cxx)
-        build_main(build_dir, args.target, args.args)
+        build_main(build_dir, args.jobs, args.target, args.args)
     elif args.command == "test":
         build_dir = configure_main(platform, args.preset, args.cc, args.cxx)
-        build_main(build_dir)
+        build_main(build_dir, args.jobs)
         test_main(build_dir, args.preset, args.pattern)
     elif args.command == "run":
         if args.preset == "Sanitizer":
@@ -206,45 +146,40 @@ def main():
                 "UBSAN_OPTIONS", "print_stacktrace=1:print_summary=1:halt_on_error=1"
             )
         build_dir = configure_main(platform, args.preset, args.cc, args.cxx)
-        build_main(build_dir, args.target)
+        build_main(build_dir, args.jobs, args.target)
         run_main(platform.host_system, build_dir, args.target, args.args)
     elif args.command == "debug":
         build_dir = configure_main(platform, args.preset, args.cc, args.cxx)
-        build_main(build_dir, args.target, args.args)
+        build_main(build_dir, args.jobs, args.target, args.args)
         debug_main(platform.host_system, build_dir, args.target, args.debugger, args.cmd)
     elif args.command == "install":
         build_dir = configure_main(platform, args.preset, args.cc, args.cxx)
-        build_main(build_dir, args.target, args.args)
-        build_main(build_dir, "install", args.args)
+        build_main(build_dir, args.jobs, args.target, args.args)
+        build_main(build_dir, args.jobs, "install", args.args)
     elif args.command == "vcpkg":
-        configure_build_env(args.preset, args.cc, args.cxx)
-        BuildVcpkg.build_vcpkg()
+        configure_build_env(args.preset)
+        build_vcpkg()
     elif args.command == "clean":
-        clean_main(args.preset, args.cc, args.cxx)
+        clean_main(args.preset)
     elif args.command == "rebuild":
-        clean_main(args.preset, args.cc, args.cxx)
+        clean_main(args.preset)
         build_dir = configure_main(platform, args.preset, args.cc, args.cxx)
-        build_main(build_dir, args.target, args.args)
+        build_main(build_dir, args.jobs, args.target, args.args)
     elif args.command == "addr2line":
         build_dir = configure_main(platform, args.preset, args.cc, args.cxx)
-        build_main(build_dir, args.target, args.args)
+        build_main(build_dir, args.jobs, args.target)
         addr2line_main(build_dir, args.target, args.program, args.addresses)
 
 
 def configure_main(platform: Platform, preset: str, cc: str, cxx: str) -> Path:
-    ladybird_source_dir, build_preset_dir, build_env_cmake_args = configure_build_env(preset, cc, cxx)
-    BuildVcpkg.build_vcpkg()
+    ladybird_source_dir, build_preset_dir = configure_build_env(preset)
+    build_vcpkg()
 
     if build_preset_dir.joinpath("build.ninja").exists() or build_preset_dir.joinpath("ladybird.sln").exists():
         return build_preset_dir
 
-    cmake_args = []
-
-    host_system = platform.host_system
-    if host_system == HostSystem.Linux and platform.host_architecture == HostArchitecture.AArch64:
-        cmake_args.extend(configure_skia_jemalloc())
-
     validate_cmake_version()
+    (cc, cxx) = pick_host_compiler(platform, cc, cxx)
 
     config_args = [
         "cmake",
@@ -254,17 +189,16 @@ def configure_main(platform: Platform, preset: str, cc: str, cxx: str) -> Path:
         ladybird_source_dir,
         "-B",
         build_preset_dir,
+        f"-DCMAKE_C_COMPILER={cc}",
+        f"-DCMAKE_CXX_COMPILER={cxx}",
     ]
-    config_args.extend(build_env_cmake_args)
-    config_args.extend(cmake_args)
+
+    if platform.host_system == HostSystem.Linux and platform.host_architecture == HostArchitecture.AArch64:
+        config_args.extend(configure_skia_jemalloc())
 
     # FIXME: Improve error reporting for vcpkg install failures
     # https://github.com/LadybirdBrowser/ladybird/blob/master/Documentation/BuildInstructionsLadybird.md#unable-to-find-a-build-program-corresponding-to-ninja
-    try:
-        subprocess.check_call(config_args)
-    except subprocess.CalledProcessError as e:
-        print_process_stderr(e, "Unable to configure ladybird project")
-        sys.exit(1)
+    run_command(config_args, exit_on_failure=True)
 
     return build_preset_dir
 
@@ -304,23 +238,17 @@ def configure_skia_jemalloc() -> list[str]:
     return cmake_args
 
 
-def configure_build_env(preset: str, cc: str, cxx: str) -> tuple[Path, Path, list[str]]:
-    cmake_args = [
-        f"-DCMAKE_C_COMPILER={cc}",
-        f"-DCMAKE_CXX_COMPILER={cxx}",
-    ]
-
+def configure_build_env(preset: str) -> tuple[Path, Path]:
     ladybird_source_dir = ensure_ladybird_source_dir()
     build_root_dir = ladybird_source_dir / "Build"
 
     known_presets = {
         "default": build_root_dir / "release",
+        "Debug": build_root_dir / "debug",
+        "Distribution": build_root_dir / "distribution",
+        "Sanitizer": build_root_dir / "sanitizers",
         "windows_ci_ninja": build_root_dir / "release",
         "windows_dev_ninja": build_root_dir / "debug",
-        "windows_dev_msbuild": build_root_dir / "debug",
-        "Debug": build_root_dir / "debug",
-        "Sanitizer": build_root_dir / "sanitizers",
-        "Distribution": build_root_dir / "distribution",
     }
 
     build_preset_dir = known_presets.get(preset, None)
@@ -329,33 +257,31 @@ def configure_build_env(preset: str, cc: str, cxx: str) -> tuple[Path, Path, lis
         sys.exit(1)
 
     vcpkg_root = str(build_root_dir / "vcpkg")
-    os.environ["VCPKG_ROOT"] = vcpkg_root
     os.environ["PATH"] += os.pathsep + str(ladybird_source_dir.joinpath("Toolchain", "Local", "cmake", "bin"))
-    os.environ["PATH"] += os.pathsep + str(vcpkg_root)
+    os.environ["PATH"] += os.pathsep + vcpkg_root
+    os.environ["VCPKG_ROOT"] = vcpkg_root
 
-    return ladybird_source_dir, build_preset_dir, cmake_args
+    return ladybird_source_dir, build_preset_dir
 
 
 def validate_cmake_version():
     # FIXME: This 3.25+ CMake version check may not be needed anymore due to vcpkg downloading a newer version
     cmake_install_message = "Please install CMake version 3.25 or newer."
 
-    try:
-        cmake_version_output = subprocess.check_output(["cmake", "--version"], text=True).strip()
+    cmake_version_output = run_command(["cmake", "--version"], return_output=True, exit_on_failure=True)
+    assert cmake_version_output
 
-        version_match = re.search(r"version\s+(\d+)\.(\d+)\.(\d+)?", cmake_version_output)
-        if version_match:
-            major = int(version_match.group(1))
-            minor = int(version_match.group(2))
-            patch = int(version_match.group(3))
-            if major < 3 or (major == 3 and minor < 25):
-                print(f"CMake version {major}.{minor}.{patch} is too old. {cmake_install_message}", file=sys.stderr)
-                sys.exit(1)
-        else:
-            print(f"Unable to determine CMake version. {cmake_install_message}", file=sys.stderr)
-            sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        print_process_stderr(e, f"CMake not found. {cmake_install_message}\n")
+    version_match = re.search(r"version\s+(\d+)\.(\d+)\.(\d+)?", cmake_version_output)
+    if not version_match:
+        print(f"Unable to determine CMake version. {cmake_install_message}", file=sys.stderr)
+        sys.exit(1)
+
+    major = int(version_match.group(1))
+    minor = int(version_match.group(2))
+    patch = int(version_match.group(3))
+
+    if major < 3 or (major == 3 and minor < 25):
+        print(f"CMake version {major}.{minor}.{patch} is too old. {cmake_install_message}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -364,41 +290,34 @@ def ensure_ladybird_source_dir() -> Path:
     ladybird_source_dir = Path(ladybird_source_dir) if ladybird_source_dir else None
 
     if not ladybird_source_dir or not ladybird_source_dir.is_dir():
-        try:
-            top_dir = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
-            ladybird_source_dir = Path(top_dir)
+        root_dir = run_command(["git", "rev-parse", "--show-toplevel"], return_output=True, exit_on_failure=True)
+        assert root_dir
 
-            os.environ["LADYBIRD_SOURCE_DIR"] = str(ladybird_source_dir)
-        except subprocess.CalledProcessError as e:
-            print_process_stderr(e, "Unable to determine LADYBIRD_SOURCE_DIR:")
-            sys.exit(1)
+        os.environ["LADYBIRD_SOURCE_DIR"] = root_dir
+        ladybird_source_dir = Path(root_dir)
 
     return ladybird_source_dir
 
 
-def build_main(build_dir: Path, target: str | None = None, args: list[str] = []):
-    build_args = [
-        "cmake",
-        "--build",
-        str(build_dir),
-        "--parallel",
-        os.environ.get("MAKEJOBS", str(multiprocessing.cpu_count())),
-    ]
+def build_main(build_dir: Path, jobs: str | None, target: Optional[str] = None, args: list[str] = []):
+    build_args = ["ninja", "-C", str(build_dir)]
+
+    if not jobs:
+        jobs = os.environ.get("MAKEJOBS", None)
+    if jobs:
+        build_args.extend(["-j", jobs])
+
     if target:
-        build_args.extend(["--target", target])
+        build_args.append(target)
 
     if args:
         build_args.append("--")
         build_args.extend(args)
 
-    try:
-        subprocess.check_call(build_args)
-    except subprocess.CalledProcessError as e:
-        print_process_stderr(e, f"Unable to build Ladybird {f"target {target}" if target else "project"}")
-        sys.exit(1)
+    run_command(build_args, exit_on_failure=True)
 
 
-def test_main(build_dir: Path, preset: str, pattern: str | None):
+def test_main(build_dir: Path, preset: str, pattern: Optional[str]):
     test_args = [
         "ctest",
         "--preset",
@@ -411,11 +330,7 @@ def test_main(build_dir: Path, preset: str, pattern: str | None):
     if pattern:
         test_args.extend(["-R", pattern])
 
-    try:
-        subprocess.check_call(test_args)
-    except subprocess.CalledProcessError as e:
-        print_process_stderr(e, f"Unable to test Ladybird {f"pattern {pattern}" if pattern else "project"}")
-        sys.exit(1)
+    run_command(test_args, exit_on_failure=True)
 
 
 def run_main(host_system: HostSystem, build_dir: Path, target: str, args: list[str]):
@@ -436,12 +351,7 @@ def run_main(host_system: HostSystem, build_dir: Path, target: str, args: list[s
 
     run_args.extend(args)
 
-    try:
-        # FIXME: For Windows, set the working directory so DLLs are found
-        subprocess.check_call(run_args)
-    except subprocess.CalledProcessError as e:
-        print_process_stderr(e, f'Unable to run ladybird target "{target}"')
-        sys.exit(1)
+    run_command(run_args, exit_on_failure=True)
 
 
 def debug_main(host_system: HostSystem, build_dir: Path, target: str, debugger: str, debugger_commands: list[str]):
@@ -459,16 +369,11 @@ def debug_main(host_system: HostSystem, build_dir: Path, target: str, debugger: 
     else:
         gdb_args.append(str(build_dir.joinpath("bin", target)))
 
-    try:
-        # FIXME: For Windows, set the working directory so DLLs are found
-        subprocess.check_call(gdb_args)
-    except subprocess.CalledProcessError as e:
-        print_process_stderr(e, f'Unable to run ladybird target "{target}" with "{debugger}" debugger')
-        sys.exit(1)
+    run_command(gdb_args, exit_on_failure=True)
 
 
-def clean_main(preset: str, cc: str, cxx: str):
-    ladybird_source_dir, build_preset_dir, _ = configure_build_env(preset, cc, cxx)
+def clean_main(preset: str):
+    ladybird_source_dir, build_preset_dir = configure_build_env(preset)
     shutil.rmtree(str(build_preset_dir), ignore_errors=True)
 
     user_vars_cmake_module = ladybird_source_dir.joinpath("Meta", "CMake", "vcpkg", "user-variables.cmake")
@@ -498,16 +403,7 @@ def addr2line_main(build_dir, target: str, program: str, addresses: list[str]):
     ]
     addr2line_args.extend(addresses)
 
-    try:
-        subprocess.check_call(addr2line_args)
-    except subprocess.CalledProcessError as e:
-        print_process_stderr(e, f'Unable to find lines with "{program}" for binary target "{target}"')
-        sys.exit(1)
-
-
-def print_process_stderr(exception: subprocess.CalledProcessError, message: str):
-    details = f": {exception.stderr}" if exception.stderr else ""
-    print(f"{message}{details}", file=sys.stderr)
+    run_command(addr2line_args, exit_on_failure=True)
 
 
 if __name__ == "__main__":

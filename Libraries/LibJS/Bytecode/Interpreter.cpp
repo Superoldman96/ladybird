@@ -16,6 +16,7 @@
 #include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Bytecode/Label.h>
 #include <LibJS/Bytecode/Op.h>
+#include <LibJS/Export.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Accessor.h>
 #include <LibJS/Runtime/Array.h>
@@ -1789,7 +1790,7 @@ inline ThrowCompletionOr<Value> delete_by_value_with_this(Bytecode::Interpreter&
     return Value(TRY(reference.delete_(vm)));
 }
 
-class PropertyNameIterator final
+class JS_API PropertyNameIterator final
     : public Object
     , public BuiltinIterator {
     JS_OBJECT(PropertyNameIterator, Object);
@@ -2819,6 +2820,12 @@ static ThrowCompletionOr<Value> dispatch_builtin_call(Bytecode::Interpreter& int
         return TRY(MathObject::round_impl(interpreter.vm(), interpreter.get(arguments[0])));
     case Builtin::MathSqrt:
         return TRY(MathObject::sqrt_impl(interpreter.vm(), interpreter.get(arguments[0])));
+    case Builtin::MathSin:
+        return TRY(MathObject::sin_impl(interpreter.vm(), interpreter.get(arguments[0])));
+    case Builtin::MathCos:
+        return TRY(MathObject::cos_impl(interpreter.vm(), interpreter.get(arguments[0])));
+    case Builtin::MathTan:
+        return TRY(MathObject::tan_impl(interpreter.vm(), interpreter.get(arguments[0])));
     case Bytecode::Builtin::__Count:
         VERIFY_NOT_REACHED();
     }

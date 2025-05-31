@@ -420,7 +420,7 @@ WebIDL::ExceptionOr<void> HTMLInputElement::show_picker()
     // and this's type attribute is not in the File Upload state or Color state, then throw a "SecurityError" DOMException.
     // NOTE: File and Color inputs are exempted from this check for historical reason: their input activation behavior also shows their pickers,
     //       and has never been guarded by an origin check.
-    if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(*this).top_level_origin)
+    if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(*this).top_level_origin.value())
         && m_type != TypeAttributeState::FileUpload && m_type != TypeAttributeState::Color) {
         return WebIDL::SecurityError::create(realm(), "Cross origin pickers are not allowed"_string);
     }
@@ -2996,6 +2996,43 @@ bool HTMLInputElement::multiple_applies() const
     switch (type_state()) {
     case TypeAttributeState::Email:
     case TypeAttributeState::FileUpload:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// https://html.spec.whatwg.org/multipage/input.html#do-not-apply
+bool HTMLInputElement::required_applies() const
+{
+    switch (type_state()) {
+    case TypeAttributeState::Text:
+    case TypeAttributeState::Search:
+    case TypeAttributeState::Telephone:
+    case TypeAttributeState::URL:
+    case TypeAttributeState::Email:
+    case TypeAttributeState::Password:
+    case TypeAttributeState::Date:
+    case TypeAttributeState::Month:
+    case TypeAttributeState::Week:
+    case TypeAttributeState::Time:
+    case TypeAttributeState::LocalDateAndTime:
+    case TypeAttributeState::Number:
+    case TypeAttributeState::Checkbox:
+    case TypeAttributeState::RadioButton:
+    case TypeAttributeState::FileUpload:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// https://html.spec.whatwg.org/multipage/input.html#do-not-apply
+bool HTMLInputElement::checked_applies() const
+{
+    switch (type_state()) {
+    case TypeAttributeState::Checkbox:
+    case TypeAttributeState::RadioButton:
         return true;
     default:
         return false;
