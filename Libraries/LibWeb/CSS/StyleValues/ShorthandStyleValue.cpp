@@ -61,6 +61,38 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
     if (all_same_keyword && built_in_keyword.has_value())
         return m_properties.values.first()->to_string(mode);
 
+    auto default_to_string = [&]() {
+        auto all_properties_same_value = true;
+        auto first_property_value = m_properties.values.first();
+        for (auto i = 1u; i < m_properties.values.size(); ++i) {
+            if (m_properties.values[i] != first_property_value) {
+                all_properties_same_value = false;
+                break;
+            }
+        }
+        if (all_properties_same_value)
+            return first_property_value->to_string(mode);
+
+        StringBuilder builder;
+        auto first = true;
+        for (size_t i = 0; i < m_properties.values.size(); ++i) {
+            auto value = m_properties.values[i];
+            auto value_string = value->to_string(mode);
+            auto initial_value_string = property_initial_value(m_properties.sub_properties[i])->to_string(mode);
+            if (value_string == initial_value_string)
+                continue;
+            if (first)
+                first = false;
+            else
+                builder.append(' ');
+            builder.append(value->to_string(mode));
+        }
+        if (builder.is_empty())
+            return m_properties.values.first()->to_string(mode);
+
+        return MUST(builder.to_string());
+    };
+
     // Then special cases
     switch (m_properties.shorthand_property) {
     case PropertyID::Background: {
@@ -238,8 +270,9 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
             append(font_style_string);
         if (font_variant_string != "normal"sv && font_variant_string != "initial"sv)
             append(font_variant_string);
-        if (font_weight->to_font_weight() != Gfx::FontWeight::Regular && font_weight->to_keyword() != Keyword::Initial)
-            append(font_weight->to_string(mode));
+        auto font_weight_string = font_weight->to_string(mode);
+        if (font_weight_string != "normal"sv && font_weight_string != "initial"sv && font_weight_string != "400"sv)
+            append(font_weight_string);
         if (font_width->to_keyword() != Keyword::Normal && font_width->to_keyword() != Keyword::Initial)
             append(font_width->to_string(mode));
         append(font_size->to_string(mode));
@@ -401,36 +434,34 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
 
         return builder.to_string_without_validation();
     }
+    case PropertyID::WhiteSpace: {
+        auto white_space_collapse_property = longhand(PropertyID::WhiteSpaceCollapse);
+        auto text_wrap_mode_property = longhand(PropertyID::TextWrapMode);
+        auto white_space_trim_property = longhand(PropertyID::WhiteSpaceTrim);
+
+        RefPtr<CSSStyleValue const> value;
+
+        if (white_space_trim_property->is_keyword() && white_space_trim_property->as_keyword().keyword() == Keyword::None) {
+            auto white_space_collapse_keyword = white_space_collapse_property->as_keyword().keyword();
+            auto text_wrap_mode_keyword = text_wrap_mode_property->as_keyword().keyword();
+
+            if (white_space_collapse_keyword == Keyword::Collapse && text_wrap_mode_keyword == Keyword::Wrap)
+                return "normal"_string;
+
+            if (white_space_collapse_keyword == Keyword::Preserve && text_wrap_mode_keyword == Keyword::Nowrap)
+                return "pre"_string;
+
+            if (white_space_collapse_keyword == Keyword::Preserve && text_wrap_mode_keyword == Keyword::Wrap)
+                return "pre-wrap"_string;
+
+            if (white_space_collapse_keyword == Keyword::PreserveBreaks && text_wrap_mode_keyword == Keyword::Wrap)
+                return "pre-line"_string;
+        }
+
+        return default_to_string();
+    }
     default:
-        auto all_properties_same_value = true;
-        auto first_property_value = m_properties.values.first();
-        for (auto i = 1u; i < m_properties.values.size(); ++i) {
-            if (m_properties.values[i] != first_property_value) {
-                all_properties_same_value = false;
-                break;
-            }
-        }
-        if (all_properties_same_value)
-            return first_property_value->to_string(mode);
-
-        StringBuilder builder;
-        auto first = true;
-        for (size_t i = 0; i < m_properties.values.size(); ++i) {
-            auto value = m_properties.values[i];
-            auto value_string = value->to_string(mode);
-            auto initial_value_string = property_initial_value(m_properties.sub_properties[i])->to_string(mode);
-            if (value_string == initial_value_string)
-                continue;
-            if (first)
-                first = false;
-            else
-                builder.append(' ');
-            builder.append(value->to_string(mode));
-        }
-        if (builder.is_empty())
-            return m_properties.values.first()->to_string(mode);
-
-        return MUST(builder.to_string());
+        return default_to_string();
     }
 }
 

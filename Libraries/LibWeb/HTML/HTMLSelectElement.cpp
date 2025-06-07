@@ -377,7 +377,7 @@ String HTMLSelectElement::value() const
 WebIDL::ExceptionOr<void> HTMLSelectElement::set_value(String const& value)
 {
     update_cached_list_of_options();
-    for (auto const& option_element : m_cached_list_of_options)
+    for (auto const& option_element : list_of_options())
         option_element->set_selected(option_element->value() == value);
     update_inner_text_element();
     return {};
@@ -515,8 +515,8 @@ WebIDL::ExceptionOr<void> HTMLSelectElement::show_picker()
         return WebIDL::InvalidStateError::create(realm(), "Element is not mutable"_string);
 
     // 2. If this's relevant settings object's origin is not same origin with this's relevant settings object's top-level origin,
-    // and this is a select element, then throw a "SecurityError" DOMException.
-    if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(*this).top_level_origin)) {
+    //    and this is a select element, then throw a "SecurityError" DOMException.
+    if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(*this).top_level_origin.value())) {
         return WebIDL::SecurityError::create(realm(), "Cross origin pickers are not allowed"_string);
     }
 
@@ -572,6 +572,16 @@ void HTMLSelectElement::did_select_item(Optional<u32> const& id)
 void HTMLSelectElement::form_associated_element_was_inserted()
 {
     create_shadow_tree_if_needed();
+}
+
+void HTMLSelectElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value, Optional<FlyString> const&)
+{
+    if (name == HTML::AttributeNames::multiple) {
+        // If the multiple attribute is absent then update the selectedness of the option elements.
+        if (!value.has_value()) {
+            update_selectedness();
+        }
+    }
 }
 
 void HTMLSelectElement::computed_properties_changed()

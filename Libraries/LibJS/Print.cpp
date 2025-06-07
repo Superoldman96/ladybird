@@ -717,6 +717,8 @@ ErrorOr<void> print_intl_plural_rules(JS::PrintContext& print_context, JS::Intl:
     TRY(print_value(print_context, JS::PrimitiveString::create(plural_rules.vm(), plural_rules.locale()), seen_objects));
     TRY(js_out(print_context, "\n  type: "));
     TRY(print_value(print_context, JS::PrimitiveString::create(plural_rules.vm(), plural_rules.type_string()), seen_objects));
+    TRY(js_out(print_context, "\n  notation: "));
+    TRY(print_value(print_context, JS::PrimitiveString::create(plural_rules.vm(), plural_rules.notation_string()), seen_objects));
     TRY(js_out(print_context, "\n  minimumIntegerDigits: "));
     TRY(print_value(print_context, JS::Value(plural_rules.min_integer_digits()), seen_objects));
     if (plural_rules.has_min_fraction_digits()) {
@@ -1036,18 +1038,18 @@ ErrorOr<void> print_value(JS::PrintContext& print_context, JS::Value value, Hash
     else if (value.is_undefined())
         TRY(js_out(print_context, "\033[34;1m"));
 
-    if (value.is_string())
+    if (value.is_string() && !print_context.disable_string_quotes)
         TRY(js_out(print_context, "\""));
     else if (value.is_negative_zero())
         TRY(js_out(print_context, "-"));
 
     auto contents = value.to_string_without_side_effects();
-    if (value.is_string())
+    if (value.is_string() && !print_context.disable_string_quotes)
         TRY(js_out(print_context, "{}", TRY(escape_for_string_literal(contents))));
     else
         TRY(js_out(print_context, "{}", contents));
 
-    if (value.is_string())
+    if (value.is_string() && !print_context.disable_string_quotes)
         TRY(js_out(print_context, "\""));
     TRY(js_out(print_context, "\033[0m"));
     return {};

@@ -9,7 +9,9 @@
 
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/CSS/CSSStyleValue.h>
+#include <LibWeb/CSS/Interpolation.h>
 #include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/CSS/PseudoElement.h>
 #include <LibWeb/CSS/StyleValues/EasingStyleValue.h>
 #include <LibWeb/CSS/Time.h>
 
@@ -20,9 +22,9 @@ class CSSTransition : public Animations::Animation {
     GC_DECLARE_ALLOCATOR(CSSTransition);
 
 public:
-    static GC::Ref<CSSTransition> start_a_transition(DOM::Element&, PropertyID, size_t transition_generation,
-        double start_time, double end_time, NonnullRefPtr<CSSStyleValue const> start_value, NonnullRefPtr<CSSStyleValue const> end_value,
-        NonnullRefPtr<CSSStyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor);
+    static GC::Ref<CSSTransition> start_a_transition(DOM::Element&, Optional<PseudoElement>, PropertyID,
+        size_t transition_generation, double start_time, double end_time, NonnullRefPtr<CSSStyleValue const> start_value,
+        NonnullRefPtr<CSSStyleValue const> end_value, NonnullRefPtr<CSSStyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor);
 
     StringView transition_property() const { return string_from_property_id(m_transition_property); }
 
@@ -37,7 +39,6 @@ public:
     double reversing_shortening_factor() const { return m_reversing_shortening_factor; }
 
     double timing_function_output_at_time(double t) const;
-    NonnullRefPtr<CSSStyleValue const> value_at_time(double t) const;
 
     // This is designed to be created from AnimationEffect::Phase.
     enum class Phase : u8 {
@@ -51,7 +52,7 @@ public:
     void set_previous_phase(Phase phase) { m_previous_phase = phase; }
 
 private:
-    CSSTransition(JS::Realm&, DOM::Element&, PropertyID, size_t transition_generation,
+    CSSTransition(JS::Realm&, DOM::Element&, Optional<PseudoElement>, PropertyID, size_t transition_generation,
         double start_time, double end_time, NonnullRefPtr<CSSStyleValue const> start_value, NonnullRefPtr<CSSStyleValue const> end_value,
         NonnullRefPtr<CSSStyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor);
 

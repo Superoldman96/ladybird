@@ -171,7 +171,7 @@ static TokenizedFeature::NoOpener get_noopener_for_window_open(DOM::Document con
         auto top_level_origin = source_document.relevant_settings_object().top_level_origin;
 
         // 3. If blobOrigin is not same site with topLevelOrigin, then return true.
-        if (!blob_origin.is_same_site(top_level_origin))
+        if (!blob_origin.is_same_site(top_level_origin.value()))
             return TokenizedFeature::NoOpener::Yes;
     }
 
@@ -1770,7 +1770,8 @@ OrderedHashMap<FlyString, GC::Ref<Navigable>> Window::document_tree_child_naviga
     for (auto const& [name, navigable] : first_named_children) {
         // 1. Let name be navigable's target name.
         // 2. If navigable's active document's origin is same origin with window's relevant settings object's origin, then append name to names.
-        if (navigable->active_document()->origin().is_same_origin(relevant_settings_object(*this).origin()))
+        auto document = navigable->active_document();
+        if (document && document->origin().is_same_origin(relevant_settings_object(*this).origin()))
             names.set(name, *navigable);
     }
 

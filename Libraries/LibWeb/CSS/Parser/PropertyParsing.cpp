@@ -48,6 +48,7 @@
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PositionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ResolutionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ScrollbarColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ScrollbarGutterStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShadowStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
@@ -644,6 +645,10 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_css_value
         if (auto parsed_value = parse_rotate_value(tokens); parsed_value && !tokens.has_next_token())
             return parsed_value.release_nonnull();
         return ParseError::SyntaxError;
+    case PropertyID::ScrollbarColor:
+        if (auto parsed_value = parse_scrollbar_color_value(tokens); parsed_value && !tokens.has_next_token())
+            return parsed_value.release_nonnull();
+        return ParseError::SyntaxError;
     case PropertyID::ScrollbarGutter:
         if (auto parsed_value = parse_scrollbar_gutter_value(tokens); parsed_value && !tokens.has_next_token())
             return parsed_value.release_nonnull();
@@ -706,6 +711,14 @@ Parser::ParseErrorOr<NonnullRefPtr<CSSStyleValue const>> Parser::parse_css_value
         return ParseError::SyntaxError;
     case PropertyID::Contain:
         if (auto parsed_value = parse_contain_value(tokens); parsed_value && !tokens.has_next_token())
+            return parsed_value.release_nonnull();
+        return ParseError::SyntaxError;
+    case PropertyID::WhiteSpace:
+        if (auto parsed_value = parse_white_space_shorthand(tokens); parsed_value && !tokens.has_next_token())
+            return parsed_value.release_nonnull();
+        return ParseError::SyntaxError;
+    case PropertyID::WhiteSpaceTrim:
+        if (auto parsed_value = parse_white_space_trim_value(tokens); parsed_value && !tokens.has_next_token())
             return parsed_value.release_nonnull();
         return ParseError::SyntaxError;
     default:
@@ -2310,33 +2323,71 @@ RefPtr<CSSStyleValue const> Parser::parse_flex_flow_value(TokenStream<ComponentV
         { flex_direction.release_nonnull(), flex_wrap.release_nonnull() });
 }
 
+// https://drafts.csswg.org/css-fonts-4/#font-prop
 RefPtr<CSSStyleValue const> Parser::parse_font_value(TokenStream<ComponentValue>& tokens)
 {
-    RefPtr<CSSStyleValue const> font_width;
+    // [ [ <'font-style'> || <font-variant-css2> || <'font-weight'> || <font-width-css3> ]? <'font-size'> [ / <'line-height'> ]? <'font-family'># ] | <system-family-name>
     RefPtr<CSSStyleValue const> font_style;
+    RefPtr<CSSStyleValue const> font_variant;
     RefPtr<CSSStyleValue const> font_weight;
+    RefPtr<CSSStyleValue const> font_width;
     RefPtr<CSSStyleValue const> font_size;
     RefPtr<CSSStyleValue const> line_height;
     RefPtr<CSSStyleValue const> font_families;
-    RefPtr<CSSStyleValue const> font_variant;
 
-    // FIXME: Handle system fonts. (caption, icon, menu, message-box, small-caption, status-bar)
+    // FIXME: Handle <system-family-name>. (caption, icon, menu, message-box, small-caption, status-bar)
 
     // Several sub-properties can be "normal", and appear in any order: style, variant, weight, stretch
     // So, we have to handle that separately.
     int normal_count = 0;
 
-    // FIXME: `font-variant` allows a lot of different values which aren't allowed in the `font` shorthand.
-    // FIXME: `font-width` allows <percentage> values, which aren't allowed in the `font` shorthand.
-    auto remaining_longhands = Vector { PropertyID::FontSize, PropertyID::FontStyle, PropertyID::FontVariant, PropertyID::FontWeight, PropertyID::FontWidth };
+    // font-variant and font-width aren't included because we have special parsing rules for them in font.
+    auto remaining_longhands = Vector { PropertyID::FontSize, PropertyID::FontStyle, PropertyID::FontWeight };
     auto transaction = tokens.begin_transaction();
 
     while (tokens.has_next_token()) {
-        auto& peek_token = tokens.next_token();
-        if (peek_token.is_ident("normal"sv)) {
+        if (tokens.next_token().is_ident("normal"sv)) {
             normal_count++;
             tokens.discard_a_token();
             continue;
+        }
+
+        // <font-variant-css2> = normal | small-caps
+        // So, we handle that manually instead of trying to parse the font-variant property.
+        if (!font_variant && tokens.peek_token().is_ident("small-caps"sv)) {
+            tokens.discard_a_token(); // small-caps
+
+            font_variant = ShorthandStyleValue::create(PropertyID::FontVariant,
+                { PropertyID::FontVariantAlternates,
+                    PropertyID::FontVariantCaps,
+                    PropertyID::FontVariantEastAsian,
+                    PropertyID::FontVariantEmoji,
+                    PropertyID::FontVariantLigatures,
+                    PropertyID::FontVariantNumeric,
+                    PropertyID::FontVariantPosition },
+                {
+                    property_initial_value(PropertyID::FontVariantAlternates),
+                    CSSKeywordValue::create(Keyword::SmallCaps),
+                    property_initial_value(PropertyID::FontVariantEastAsian),
+                    property_initial_value(PropertyID::FontVariantEmoji),
+                    property_initial_value(PropertyID::FontVariantLigatures),
+                    property_initial_value(PropertyID::FontVariantNumeric),
+                    property_initial_value(PropertyID::FontVariantPosition),
+                });
+            continue;
+        }
+
+        // <font-width-css3> = normal | ultra-condensed | extra-condensed | condensed | semi-condensed | semi-expanded | expanded | extra-expanded | ultra-expanded
+        // So again, we do this manually.
+        if (!font_width && tokens.peek_token().is(Token::Type::Ident)) {
+            auto font_width_transaction = tokens.begin_transaction();
+            if (auto keyword = parse_keyword_value(tokens)) {
+                if (keyword_to_font_width(keyword->to_keyword()).has_value()) {
+                    font_width_transaction.commit();
+                    font_width = keyword.release_nonnull();
+                    continue;
+                }
+            }
         }
 
         auto property_and_value = parse_css_value_for_properties(remaining_longhands, tokens);
@@ -2367,19 +2418,9 @@ RefPtr<CSSStyleValue const> Parser::parse_font_value(TokenStream<ComponentValue>
             font_families = maybe_font_families.release_nonnull();
             continue;
         }
-        case PropertyID::FontWidth: {
-            VERIFY(!font_width);
-            font_width = value.release_nonnull();
-            continue;
-        }
         case PropertyID::FontStyle: {
             VERIFY(!font_style);
             font_style = FontStyleStyleValue::create(*keyword_to_font_style(value.release_nonnull()->to_keyword()));
-            continue;
-        }
-        case PropertyID::FontVariant: {
-            VERIFY(!font_variant);
-            font_variant = value.release_nonnull();
             continue;
         }
         case PropertyID::FontWeight: {
@@ -2423,7 +2464,6 @@ RefPtr<CSSStyleValue const> Parser::parse_font_value(TokenStream<ComponentValue>
             PropertyID::FontFamily,
             PropertyID::FontSize,
             PropertyID::FontWidth,
-            // FIXME: PropertyID::FontStretch
             PropertyID::FontStyle,
             PropertyID::FontVariant,
             PropertyID::FontWeight,
@@ -2435,13 +2475,6 @@ RefPtr<CSSStyleValue const> Parser::parse_font_value(TokenStream<ComponentValue>
             PropertyID::FontLanguageOverride,
             // FIXME: PropertyID::FontOpticalSizing,
             // FIXME: PropertyID::FontSizeAdjust,
-            PropertyID::FontVariantAlternates,
-            PropertyID::FontVariantCaps,
-            PropertyID::FontVariantEastAsian,
-            PropertyID::FontVariantEmoji,
-            PropertyID::FontVariantLigatures,
-            PropertyID::FontVariantNumeric,
-            PropertyID::FontVariantPosition,
             PropertyID::FontVariationSettings,
         },
         {
@@ -2449,7 +2482,6 @@ RefPtr<CSSStyleValue const> Parser::parse_font_value(TokenStream<ComponentValue>
             font_families.release_nonnull(),
             font_size.release_nonnull(),
             font_width.release_nonnull(),
-            // FIXME: font-stretch
             font_style.release_nonnull(),
             font_variant.release_nonnull(),
             font_weight.release_nonnull(),
@@ -2461,13 +2493,6 @@ RefPtr<CSSStyleValue const> Parser::parse_font_value(TokenStream<ComponentValue>
             initial_value, // font-language-override
                            // FIXME: font-optical-sizing,
                            // FIXME: font-size-adjust,
-            initial_value, // font-variant-alternates
-            initial_value, // font-variant-caps
-            initial_value, // font-variant-east-asian
-            initial_value, // font-variant-emoji
-            initial_value, // font-variant-ligatures
-            initial_value, // font-variant-numeric
-            initial_value, // font-variant-position
             initial_value, // font-variation-settings
         });
 }
@@ -4037,6 +4062,32 @@ RefPtr<CSSStyleValue const> Parser::parse_scale_value(TokenStream<ComponentValue
     return TransformationStyleValue::create(PropertyID::Scale, TransformFunction::Scale, { maybe_x.release_nonnull(), maybe_y.release_nonnull(), maybe_z.release_nonnull() });
 }
 
+// https://drafts.csswg.org/css-scrollbars/#propdef-scrollbar-color
+RefPtr<CSSStyleValue const> Parser::parse_scrollbar_color_value(TokenStream<ComponentValue>& tokens)
+{
+    // auto | <color>{2}
+    if (!tokens.has_next_token())
+        return nullptr;
+    if (auto auto_keyword = parse_all_as_single_keyword_value(tokens, Keyword::Auto))
+        return auto_keyword;
+
+    auto transaction = tokens.begin_transaction();
+
+    auto thumb_color = parse_color_value(tokens);
+    if (!thumb_color)
+        return nullptr;
+
+    tokens.discard_whitespace();
+
+    auto track_color = parse_color_value(tokens);
+    if (!track_color)
+        return nullptr;
+    tokens.discard_whitespace();
+    transaction.commit();
+
+    return ScrollbarColorStyleValue::create(thumb_color.release_nonnull(), track_color.release_nonnull());
+}
+
 // https://drafts.csswg.org/css-overflow/#propdef-scrollbar-gutter
 RefPtr<CSSStyleValue const> Parser::parse_scrollbar_gutter_value(TokenStream<ComponentValue>& tokens)
 {
@@ -4525,7 +4576,7 @@ RefPtr<CSSStyleValue const> Parser::parse_filter_value_list_value(TokenStream<Co
 
     auto filter_token_to_operation = [&](auto filter) {
         VERIFY(to_underlying(filter) < to_underlying(FilterToken::Blur));
-        return static_cast<Gfx::ColorFilter::Type>(filter);
+        return static_cast<Gfx::ColorFilterType>(filter);
     };
 
     auto parse_filter_function_name = [&](auto name) -> Optional<FilterToken> {
@@ -4747,6 +4798,153 @@ RefPtr<CSSStyleValue const> Parser::parse_contain_value(TokenStream<ComponentVal
     transaction.commit();
 
     return StyleValueList::create(move(containments), StyleValueList::Separator::Space);
+}
+
+// https://www.w3.org/TR/css-text-4/#white-space-trim
+RefPtr<CSSStyleValue const> Parser::parse_white_space_trim_value(TokenStream<ComponentValue>& tokens)
+{
+    // none | discard-before || discard-after || discard-inner
+
+    if (auto none = parse_all_as_single_keyword_value(tokens, Keyword::None))
+        return none;
+
+    auto transaction = tokens.begin_transaction();
+
+    RefPtr<CSSStyleValue const> discard_before;
+    RefPtr<CSSStyleValue const> discard_after;
+    RefPtr<CSSStyleValue const> discard_inner;
+
+    while (auto parsed_value = parse_css_value_for_property(PropertyID::WhiteSpaceTrim, tokens)) {
+        switch (parsed_value->as_keyword().keyword()) {
+        case Keyword::DiscardBefore:
+            if (discard_before)
+                return {};
+            discard_before = parsed_value;
+            break;
+        case Keyword::DiscardAfter:
+            if (discard_after)
+                return {};
+            discard_after = parsed_value;
+            break;
+        case Keyword::DiscardInner:
+            if (discard_inner)
+                return {};
+            discard_inner = parsed_value;
+            break;
+        default:
+            return {};
+        }
+
+        if (!tokens.has_next_token())
+            break;
+    }
+
+    StyleValueVector parsed_values;
+
+    // NOTE: The values are appended here rather than in the loop above to canonicalize their order.
+    if (discard_before)
+        parsed_values.append(discard_before.release_nonnull());
+    if (discard_after)
+        parsed_values.append(discard_after.release_nonnull());
+    if (discard_inner)
+        parsed_values.append(discard_inner.release_nonnull());
+
+    transaction.commit();
+
+    return StyleValueList::create(move(parsed_values), StyleValueList::Separator::Space);
+}
+
+// https://www.w3.org/TR/css-text-4/#white-space-property
+RefPtr<CSSStyleValue const> Parser::parse_white_space_shorthand(TokenStream<ComponentValue>& tokens)
+{
+    // normal | pre | pre-wrap | pre-line | <'white-space-collapse'> || <'text-wrap-mode'> || <'white-space-trim'>
+
+    auto transaction = tokens.begin_transaction();
+
+    auto make_whitespace_shorthand = [&](RefPtr<CSSStyleValue const> white_space_collapse, RefPtr<CSSStyleValue const> text_wrap_mode, RefPtr<CSSStyleValue const> white_space_trim) {
+        transaction.commit();
+
+        if (!white_space_collapse)
+            white_space_collapse = property_initial_value(PropertyID::WhiteSpaceCollapse);
+
+        if (!text_wrap_mode)
+            text_wrap_mode = property_initial_value(PropertyID::TextWrapMode);
+
+        if (!white_space_trim)
+            white_space_trim = property_initial_value(PropertyID::WhiteSpaceTrim);
+
+        return ShorthandStyleValue::create(
+            PropertyID::WhiteSpace,
+            { PropertyID::WhiteSpaceCollapse, PropertyID::TextWrapMode, PropertyID::WhiteSpaceTrim },
+            { white_space_collapse.release_nonnull(), text_wrap_mode.release_nonnull(), white_space_trim.release_nonnull() });
+    };
+
+    // normal | pre | pre-wrap | pre-line
+    if (parse_all_as_single_keyword_value(tokens, Keyword::Normal))
+        return make_whitespace_shorthand(CSSKeywordValue::create(Keyword::Collapse), CSSKeywordValue::create(Keyword::Wrap), CSSKeywordValue::create(Keyword::None));
+
+    if (parse_all_as_single_keyword_value(tokens, Keyword::Pre))
+        return make_whitespace_shorthand(CSSKeywordValue::create(Keyword::Preserve), CSSKeywordValue::create(Keyword::Nowrap), CSSKeywordValue::create(Keyword::None));
+
+    if (parse_all_as_single_keyword_value(tokens, Keyword::PreWrap))
+        return make_whitespace_shorthand(CSSKeywordValue::create(Keyword::Preserve), CSSKeywordValue::create(Keyword::Wrap), CSSKeywordValue::create(Keyword::None));
+
+    if (parse_all_as_single_keyword_value(tokens, Keyword::PreLine))
+        return make_whitespace_shorthand(CSSKeywordValue::create(Keyword::PreserveBreaks), CSSKeywordValue::create(Keyword::Wrap), CSSKeywordValue::create(Keyword::None));
+
+    // <'white-space-collapse'> || <'text-wrap-mode'> || <'white-space-trim'>
+    RefPtr<CSSStyleValue const> white_space_collapse;
+    RefPtr<CSSStyleValue const> text_wrap_mode;
+    RefPtr<CSSStyleValue const> white_space_trim;
+
+    while (tokens.has_next_token()) {
+        if (auto value = parse_css_value_for_property(PropertyID::WhiteSpaceCollapse, tokens)) {
+            if (white_space_collapse)
+                return {};
+            white_space_collapse = value;
+            continue;
+        }
+
+        if (auto value = parse_css_value_for_property(PropertyID::TextWrapMode, tokens)) {
+            if (text_wrap_mode)
+                return {};
+            text_wrap_mode = value;
+            continue;
+        }
+
+        Vector<ComponentValue> white_space_trim_component_values;
+
+        while (true) {
+            auto peek_token = tokens.next_token();
+
+            if (!peek_token.is(Token::Type::Ident)) {
+                break;
+            }
+
+            auto keyword = keyword_from_string(peek_token.token().ident());
+
+            if (!keyword.has_value() || !property_accepts_keyword(PropertyID::WhiteSpaceTrim, keyword.value())) {
+                break;
+            }
+
+            white_space_trim_component_values.append(tokens.consume_a_token());
+        }
+
+        if (!white_space_trim_component_values.is_empty()) {
+            auto white_space_trim_token_stream = TokenStream { white_space_trim_component_values };
+
+            if (auto value = parse_white_space_trim_value(white_space_trim_token_stream)) {
+                if (white_space_trim)
+                    return {};
+                white_space_trim = value;
+                continue;
+            }
+        }
+
+        return {};
+    }
+
+    return make_whitespace_shorthand(white_space_collapse, text_wrap_mode, white_space_trim);
 }
 
 }

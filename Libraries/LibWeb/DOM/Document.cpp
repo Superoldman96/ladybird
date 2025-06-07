@@ -316,7 +316,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
             top_level_creation_url = parent_environment.top_level_creation_url;
 
             // 3. Set topLevelOrigin to parentEnvironment's top-level origin.
-            top_level_origin = parent_environment.top_level_origin;
+            top_level_origin = parent_environment.top_level_origin.value();
         }
 
         // 10. Set up a window environment settings object with creationURL, realm execution context,
@@ -1571,8 +1571,6 @@ void Document::update_animated_style_if_needed()
             if (animation->is_idle() || animation->is_finished())
                 continue;
             if (auto effect = animation->effect()) {
-                if (auto* target = effect->target())
-                    target->reset_animated_css_properties();
                 effect->update_computed_properties();
             }
         }
@@ -1771,7 +1769,8 @@ void Document::invalidate_style_of_elements_affected_by_has()
         return;
     }
 
-    for (auto const& node : m_pending_nodes_for_style_invalidation_due_to_presence_of_has) {
+    auto nodes = move(m_pending_nodes_for_style_invalidation_due_to_presence_of_has);
+    for (auto const& node : nodes) {
         if (node.is_null())
             continue;
         for (auto* ancestor = node.ptr(); ancestor; ancestor = ancestor->parent_or_shadow_host()) {
@@ -4624,11 +4623,7 @@ void Document::queue_intersection_observer_task()
         m_intersection_observer_task_queued = false;
 
         // 2. Let notify list be a list of all IntersectionObservers whose root is in the DOM tree of document.
-        Vector<GC::Root<IntersectionObserver::IntersectionObserver>> notify_list;
-        notify_list.try_ensure_capacity(m_intersection_observers.size()).release_value_but_fixme_should_propagate_errors();
-        for (auto& observer : m_intersection_observers) {
-            notify_list.append(GC::make_root(observer));
-        }
+        auto notify_list = GC::RootVector { heap(), m_intersection_observers.values() };
 
         // 3. For each IntersectionObserver object observer in notify list, run these steps:
         for (auto& observer : notify_list) {
@@ -4710,10 +4705,7 @@ void Document::run_the_update_intersection_observations_steps(HighResolutionTime
     // 2. For each observer in observer list:
 
     // NOTE: We make a copy of the intersection observers list to avoid modifying it while iterating.
-    GC::RootVector<GC::Ref<IntersectionObserver::IntersectionObserver>> intersection_observers(heap());
-    intersection_observers.ensure_capacity(m_intersection_observers.size());
-    for (auto& observer : m_intersection_observers)
-        intersection_observers.append(observer);
+    auto intersection_observers = GC::RootVector { heap(), m_intersection_observers.values() };
 
     for (auto& observer : intersection_observers) {
         // 1. Let rootBounds be observer’s root intersection rectangle.
@@ -5241,7 +5233,9 @@ void Document::update_animations_and_send_events(Optional<double> const& timesta
     //   updated.
     // - Queueing animation events for any such animations.
     m_last_animation_frame_timestamp = timestamp;
-    for (auto const& timeline : m_associated_animation_timelines)
+
+    auto timelines_to_update = GC::RootVector { heap(), m_associated_animation_timelines.values() };
+    for (auto const& timeline : timelines_to_update)
         timeline->set_current_time(timestamp);
 
     // 2. Remove replaced animations for doc.
@@ -5297,8 +5291,9 @@ void Document::update_animations_and_send_events(Optional<double> const& timesta
     for (auto const& event : events_to_dispatch)
         event.target->dispatch_event(event.event);
 
-    for (auto& timeline : m_associated_animation_timelines) {
-        for (auto& animation : timeline->associated_animations())
+    for (auto& timeline : timelines_to_update) {
+        auto animations_to_dispatch = GC::RootVector { heap(), timeline->associated_animations().values() };
+        for (auto& animation : animations_to_dispatch)
             dispatch_events_for_animation_if_necessary(animation);
     }
 }
@@ -5827,11 +5822,7 @@ size_t Document::broadcast_active_resize_observations()
     // 2. For each observer in document.[[resizeObservers]] run these steps:
 
     // NOTE: We make a copy of the resize observers list to avoid modifying it while iterating.
-    GC::RootVector<GC::Ref<ResizeObserver::ResizeObserver>> resize_observers(heap());
-    resize_observers.ensure_capacity(m_resize_observers.size());
-    for (auto const& observer : m_resize_observers)
-        resize_observers.append(observer);
-
+    auto resize_observers = GC::RootVector { heap(), m_resize_observers };
     for (auto const& observer : resize_observers) {
         // 1. If observer.[[activeTargets]] slot is empty, continue.
         if (observer->active_targets().is_empty()) {
@@ -6120,12 +6111,17 @@ void Document::process_top_layer_removals()
 {
     // 1. For each element el in doc’s pending top layer removals: if el’s computed value of overlay is none, or el is
     //    not rendered, remove el from doc’s top layer and pending top layer removals.
+    GC::RootVector<GC::Ref<Element>> elements_to_remove(heap());
     for (auto& element : m_top_layer_pending_removals) {
         // FIXME: Implement overlay property
-        if (true || !element->paintable()) {
-            m_top_layer_elements.remove(element);
-            m_top_layer_pending_removals.remove(element);
+        if (!element->paintable()) {
+            elements_to_remove.append(element);
         }
+    }
+
+    for (auto& element : elements_to_remove) {
+        m_top_layer_elements.remove(element);
+        m_top_layer_pending_removals.remove(element);
     }
 }
 
@@ -6310,9 +6306,12 @@ GC::Ptr<DOM::Position> Document::cursor_position() const
         return nullptr;
 
     Optional<HTML::FormAssociatedTextControlElement const&> target {};
-    if (is<HTML::HTMLInputElement>(*focused_element))
-        target = static_cast<HTML::HTMLInputElement const&>(*focused_element);
-    else if (is<HTML::HTMLTextAreaElement>(*focused_element))
+    if (auto const* input_element = as_if<HTML::HTMLInputElement>(*focused_element)) {
+        // Some types of <input> tags shouldn't have a cursor, like buttons
+        if (!input_element->can_have_text_editing_cursor())
+            return nullptr;
+        target = *input_element;
+    } else if (is<HTML::HTMLTextAreaElement>(*focused_element))
         target = static_cast<HTML::HTMLTextAreaElement const&>(*focused_element);
 
     if (target.has_value())

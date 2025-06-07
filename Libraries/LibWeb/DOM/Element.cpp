@@ -789,13 +789,6 @@ GC::Ref<CSS::ComputedProperties> Element::resolved_css_values(Optional<CSS::Pseu
     return properties;
 }
 
-void Element::reset_animated_css_properties()
-{
-    if (!m_computed_properties)
-        return;
-    m_computed_properties->reset_animated_properties();
-}
-
 DOMTokenList* Element::class_list()
 {
     if (!m_class_list)
@@ -2397,6 +2390,9 @@ void Element::invalidate_style_after_attribute_change(FlyString const& attribute
         changed_properties.append({ .type = CSS::InvalidationSet::Property::Type::PseudoClass, .value = CSS::PseudoClass::PlaceholderShown });
     } else if (attribute_name == HTML::AttributeNames::value) {
         changed_properties.append({ .type = CSS::InvalidationSet::Property::Type::PseudoClass, .value = CSS::PseudoClass::Checked });
+    } else if (attribute_name == HTML::AttributeNames::required) {
+        changed_properties.append({ .type = CSS::InvalidationSet::Property::Type::PseudoClass, .value = CSS::PseudoClass::Required });
+        changed_properties.append({ .type = CSS::InvalidationSet::Property::Type::PseudoClass, .value = CSS::PseudoClass::Optional });
     }
 
     changed_properties.append({ .type = CSS::InvalidationSet::Property::Type::Attribute, .value = attribute_name });
@@ -3325,6 +3321,36 @@ IntersectionObserver::IntersectionObserverRegistration& Element::get_intersectio
     });
     VERIFY(!registration_iterator.is_end());
     return *registration_iterator;
+}
+
+// https://html.spec.whatwg.org/multipage/dom.html#translation-mode
+Element::TranslationMode Element::translation_mode() const
+{
+    // Each element (even non-HTML elements) has a translation mode, which is in either the translate-enabled state or
+    // the no-translate state.
+
+    // If an HTML element's translate attribute is in the Yes state, then the element's translation mode is in the
+    // translate-enabled state;
+    // NOTE: The attribute is in the Yes state if the attribute is present and its value is the empty string or is a
+    //       ASCII-case-insensitive match for "yes".
+    auto maybe_translate_attribute = attribute(HTML::AttributeNames::translate);
+    if (maybe_translate_attribute.has_value() && (maybe_translate_attribute.value().is_empty() || maybe_translate_attribute.value().equals_ignoring_ascii_case("yes"sv)))
+        return TranslationMode::TranslateEnabled;
+
+    // otherwise, if the element's translate attribute is in the No state, then the element's translation mode is in
+    // the no-translate state.
+    if (maybe_translate_attribute.has_value() && maybe_translate_attribute.value().equals_ignoring_ascii_case("no"sv)) {
+        return TranslationMode::NoTranslate;
+    }
+
+    // Otherwise, either the element's translate attribute is in the Inherit state, or the element is not an HTML
+    // element and thus does not have a translate attribute; in either case, the element's translation mode is in the
+    // same state as its parent element's, if any.
+    if (auto parent = parent_element())
+        return parent->translation_mode();
+
+    // or in the translate-enabled state, if the element's parent element is null
+    return TranslationMode::TranslateEnabled;
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#the-directionality
