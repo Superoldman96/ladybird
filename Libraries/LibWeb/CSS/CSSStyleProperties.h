@@ -22,7 +22,7 @@ class CSSStyleProperties
 public:
     [[nodiscard]] static GC::Ref<CSSStyleProperties> create(JS::Realm&, Vector<StyleProperty>, HashMap<FlyString, StyleProperty> custom_properties);
 
-    [[nodiscard]] static GC::Ref<CSSStyleProperties> create_resolved_style(DOM::ElementReference);
+    [[nodiscard]] static GC::Ref<CSSStyleProperties> create_resolved_style(JS::Realm&, Optional<DOM::ElementReference>);
     [[nodiscard]] static GC::Ref<CSSStyleProperties> create_element_inline_style(DOM::ElementReference, Vector<StyleProperty>, HashMap<FlyString, StyleProperty> custom_properties);
 
     virtual ~CSSStyleProperties() override = default;
@@ -52,6 +52,8 @@ public:
     WebIDL::ExceptionOr<void> set_css_float(StringView);
 
     virtual String serialized() const final override;
+    String serialize_a_css_value(StyleProperty const&) const;
+    String serialize_a_css_value(Vector<StyleProperty>) const;
     virtual WebIDL::ExceptionOr<void> set_css_text(StringView) override;
 
     void set_declarations_from_text(StringView);
@@ -61,6 +63,7 @@ public:
 
 private:
     CSSStyleProperties(JS::Realm&, Computed, Readonly, Vector<StyleProperty> properties, HashMap<FlyString, StyleProperty> custom_properties, Optional<DOM::ElementReference>);
+    static Vector<StyleProperty> convert_declarations_to_specified_order(Vector<StyleProperty>&);
 
     virtual void visit_edges(Cell::Visitor&) override;
 

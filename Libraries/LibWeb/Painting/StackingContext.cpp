@@ -348,8 +348,8 @@ void StackingContext::paint(PaintContext& context) const
     context.display_list_recorder().push_stacking_context(push_stacking_context_params);
 
     auto const& filter = computed_values.filter();
-    if (!filter.is_empty()) {
-        context.display_list_recorder().apply_filters(paintable_box().computed_values().filter());
+    if (filter.has_value()) {
+        context.display_list_recorder().apply_filter(paintable_box().computed_values().filter().value());
     }
 
     if (auto mask_image = computed_values.mask_image()) {
@@ -362,8 +362,6 @@ void StackingContext::paint(PaintContext& context) const
     }
 
     if (auto masking_area = paintable_box().get_masking_area(); masking_area.has_value()) {
-        if (masking_area->is_empty())
-            return;
         auto mask_bitmap = paintable_box().calculate_mask(context, *masking_area);
         if (mask_bitmap) {
             auto masking_area_rect = context.enclosing_device_rect(*masking_area).to_type<int>();
@@ -371,9 +369,11 @@ void StackingContext::paint(PaintContext& context) const
         }
     }
 
+    context.display_list_recorder().push_scroll_frame_id({});
     paint_internal(context);
+    context.display_list_recorder().pop_scroll_frame_id();
 
-    if (!filter.is_empty()) {
+    if (filter.has_value()) {
         context.display_list_recorder().restore();
     }
 

@@ -288,6 +288,7 @@ class Selector;
 class ShadowStyleValue;
 class ShorthandStyleValue;
 class Size;
+class ScrollbarColorStyleValue;
 class StringStyleValue;
 class StyleComputer;
 class ComputedProperties;
@@ -625,6 +626,7 @@ class TextTrack;
 class TextTrackCue;
 class TextTrackCueList;
 class TextTrackList;
+class TextTrackObserver;
 class Timer;
 class TimeRanges;
 class ToggleEvent;
@@ -916,13 +918,13 @@ struct UnderlyingSource;
 namespace Web::StorageAPI {
 
 class NavigatorStorage;
+class StorageBottle;
+class StorageBucket;
 class StorageManager;
 class StorageShed;
+class StorageShelf;
 
-struct StorageBottle;
-struct StorageBucket;
 struct StorageEndpoint;
-struct StorageShelf;
 
 }
 

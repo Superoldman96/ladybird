@@ -428,7 +428,7 @@ Navigable::ChosenNavigable Navigable::choose_a_navigable(StringView name, Tokeni
             // 4. If currentDocument's opener policy's value is "same-origin" or "same-origin-plus-COEP",
             //    and currentDocument's origin is not same origin with currentDocument's relevant settings object's top-level origin, then:
             if ((current_document->opener_policy().value == OpenerPolicyValue::SameOrigin || current_document->opener_policy().value == OpenerPolicyValue::SameOriginPlusCOEP)
-                && !current_document->origin().is_same_origin(relevant_settings_object(*current_document).top_level_origin)) {
+                && !current_document->origin().is_same_origin(relevant_settings_object(*current_document).top_level_origin.value())) {
 
                 // 1. Set noopener to true.
                 no_opener = TokenizedFeature::NoOpener::Yes;
@@ -936,7 +936,7 @@ static WebIDL::ExceptionOr<Navigable::NavigationParamsVariant> create_navigation
             Optional<URL::URL> top_level_creation_url = current_url;
 
             // 2. Let topLevelOrigin be null.
-            URL::Origin top_level_origin;
+            Optional<URL::Origin> top_level_origin;
 
             // 3. If navigable is not a top-level traversable, then:
             if (!navigable->is_top_level_traversable()) {
@@ -1930,6 +1930,9 @@ void Navigable::navigate_to_a_javascript_url(URL::URL const& url, HistoryHandlin
     auto request = Fetch::Infrastructure::Request::create(vm);
     request->set_url(url);
     request->set_policy_container(source_snapshot_params->source_policy_container);
+
+    // AD-HOC: See https://github.com/whatwg/html/issues/4651, requires some investigation to figure out what we should be setting here.
+    request->set_client(source_snapshot_params->fetch_client);
 
     // 5. If the result of should navigation request of type be blocked by Content Security Policy? given request and cspNavigationType is "Blocked", then return.
     if (ContentSecurityPolicy::should_navigation_request_of_type_be_blocked_by_content_security_policy(request, csp_navigation_type) == ContentSecurityPolicy::Directives::Directive::Result::Blocked)

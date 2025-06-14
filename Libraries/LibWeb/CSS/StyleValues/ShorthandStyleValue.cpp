@@ -61,8 +61,45 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
     if (all_same_keyword && built_in_keyword.has_value())
         return m_properties.values.first()->to_string(mode);
 
+    auto default_to_string = [&]() {
+        auto all_properties_same_value = true;
+        auto first_property_value = m_properties.values.first();
+        for (auto i = 1u; i < m_properties.values.size(); ++i) {
+            if (m_properties.values[i] != first_property_value) {
+                all_properties_same_value = false;
+                break;
+            }
+        }
+        if (all_properties_same_value)
+            return first_property_value->to_string(mode);
+
+        StringBuilder builder;
+        auto first = true;
+        for (size_t i = 0; i < m_properties.values.size(); ++i) {
+            auto value = m_properties.values[i];
+            auto value_string = value->to_string(mode);
+            auto initial_value_string = property_initial_value(m_properties.sub_properties[i])->to_string(mode);
+            if (value_string == initial_value_string)
+                continue;
+            if (first)
+                first = false;
+            else
+                builder.append(' ');
+            builder.append(value->to_string(mode));
+        }
+        if (builder.is_empty())
+            return m_properties.values.first()->to_string(mode);
+
+        return MUST(builder.to_string());
+    };
+
     // Then special cases
     switch (m_properties.shorthand_property) {
+    case PropertyID::All: {
+        // NOTE: 'all' can only be serialized in the case all sub-properties share the same CSS-wide keyword, this is
+        //       handled above, thus, if we get to here that mustn't be the case and we should return the empty string.
+        return ""_string;
+    }
     case PropertyID::Background: {
         auto color = longhand(PropertyID::BackgroundColor);
         auto image = longhand(PropertyID::BackgroundImage);
@@ -75,6 +112,31 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
         auto origin = longhand(PropertyID::BackgroundOrigin);
         auto clip = longhand(PropertyID::BackgroundClip);
 
+        auto serialize_layer = [mode](Optional<String> color_value_string, String image_value_string, String position_x_value_string, String position_y_value_string, String size_value_string, String repeat_value_string, String attachment_value_string, String origin_value_string, String clip_value_string) {
+            StringBuilder builder;
+
+            Vector<PropertyID> property_ids = { PropertyID::BackgroundColor, PropertyID::BackgroundImage, PropertyID::BackgroundPositionX, PropertyID::BackgroundPositionY, PropertyID::BackgroundSize, PropertyID::BackgroundRepeat, PropertyID::BackgroundAttachment, PropertyID::BackgroundOrigin, PropertyID::BackgroundClip };
+            Vector<Optional<String>> property_value_strings = { move(color_value_string), move(image_value_string), move(position_x_value_string), move(position_y_value_string), move(size_value_string), move(repeat_value_string), move(attachment_value_string), move(origin_value_string), move(clip_value_string) };
+
+            for (size_t i = 0; i < property_ids.size(); i++) {
+                if (!property_value_strings[i].has_value())
+                    continue;
+
+                auto intial_property_string_value = property_initial_value(property_ids[i])->to_string(mode);
+
+                if (property_value_strings[i].value() != intial_property_string_value) {
+                    if (!builder.is_empty())
+                        builder.append(" "sv);
+                    builder.append(property_value_strings[i].value());
+                }
+            }
+
+            if (builder.is_empty())
+                return "none"_string;
+
+            return builder.to_string_without_validation();
+        };
+
         auto get_layer_count = [](auto style_value) -> size_t {
             return style_value->is_value_list() ? style_value->as_value_list().size() : 1;
         };
@@ -82,7 +144,7 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
         auto layer_count = max(get_layer_count(image), max(get_layer_count(position_x), max(get_layer_count(position_y), max(get_layer_count(size), max(get_layer_count(repeat), max(get_layer_count(attachment), max(get_layer_count(origin), get_layer_count(clip))))))));
 
         if (layer_count == 1) {
-            return MUST(String::formatted("{} {} {} {} {} {} {} {} {}", color->to_string(mode), image->to_string(mode), position_x->to_string(mode), position_y->to_string(mode), size->to_string(mode), repeat->to_string(mode), attachment->to_string(mode), origin->to_string(mode), clip->to_string(mode)));
+            return serialize_layer(color->to_string(mode), image->to_string(mode), position_x->to_string(mode), position_y->to_string(mode), size->to_string(mode), repeat->to_string(mode), attachment->to_string(mode), origin->to_string(mode), clip->to_string(mode));
         }
 
         auto get_layer_value_string = [mode](ValueComparingRefPtr<CSSStyleValue const> const& style_value, size_t index) {
@@ -95,9 +157,12 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
         for (size_t i = 0; i < layer_count; i++) {
             if (i)
                 builder.append(", "sv);
+
+            Optional<String> maybe_color_value_string;
             if (i == layer_count - 1)
-                builder.appendff("{} ", color->to_string(mode));
-            builder.appendff("{} {} {} {} {} {} {} {}", get_layer_value_string(image, i), get_layer_value_string(position_x, i), get_layer_value_string(position_y, i), get_layer_value_string(size, i), get_layer_value_string(repeat, i), get_layer_value_string(attachment, i), get_layer_value_string(origin, i), get_layer_value_string(clip, i));
+                maybe_color_value_string = color->to_string(mode);
+
+            builder.append(serialize_layer(maybe_color_value_string, get_layer_value_string(image, i), get_layer_value_string(position_x, i), get_layer_value_string(position_y, i), get_layer_value_string(size, i), get_layer_value_string(repeat, i), get_layer_value_string(attachment, i), get_layer_value_string(origin, i), get_layer_value_string(clip, i)));
         }
 
         return MUST(builder.to_string());
@@ -238,8 +303,9 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
             append(font_style_string);
         if (font_variant_string != "normal"sv && font_variant_string != "initial"sv)
             append(font_variant_string);
-        if (font_weight->to_font_weight() != Gfx::FontWeight::Regular && font_weight->to_keyword() != Keyword::Initial)
-            append(font_weight->to_string(mode));
+        auto font_weight_string = font_weight->to_string(mode);
+        if (font_weight_string != "normal"sv && font_weight_string != "initial"sv && font_weight_string != "400"sv)
+            append(font_weight_string);
         if (font_width->to_keyword() != Keyword::Normal && font_width->to_keyword() != Keyword::Initial)
             append(font_width->to_string(mode));
         append(font_size->to_string(mode));
@@ -401,36 +467,34 @@ String ShorthandStyleValue::to_string(SerializationMode mode) const
 
         return builder.to_string_without_validation();
     }
+    case PropertyID::WhiteSpace: {
+        auto white_space_collapse_property = longhand(PropertyID::WhiteSpaceCollapse);
+        auto text_wrap_mode_property = longhand(PropertyID::TextWrapMode);
+        auto white_space_trim_property = longhand(PropertyID::WhiteSpaceTrim);
+
+        RefPtr<CSSStyleValue const> value;
+
+        if (white_space_trim_property->is_keyword() && white_space_trim_property->as_keyword().keyword() == Keyword::None) {
+            auto white_space_collapse_keyword = white_space_collapse_property->as_keyword().keyword();
+            auto text_wrap_mode_keyword = text_wrap_mode_property->as_keyword().keyword();
+
+            if (white_space_collapse_keyword == Keyword::Collapse && text_wrap_mode_keyword == Keyword::Wrap)
+                return "normal"_string;
+
+            if (white_space_collapse_keyword == Keyword::Preserve && text_wrap_mode_keyword == Keyword::Nowrap)
+                return "pre"_string;
+
+            if (white_space_collapse_keyword == Keyword::Preserve && text_wrap_mode_keyword == Keyword::Wrap)
+                return "pre-wrap"_string;
+
+            if (white_space_collapse_keyword == Keyword::PreserveBreaks && text_wrap_mode_keyword == Keyword::Wrap)
+                return "pre-line"_string;
+        }
+
+        return default_to_string();
+    }
     default:
-        auto all_properties_same_value = true;
-        auto first_property_value = m_properties.values.first();
-        for (auto i = 1u; i < m_properties.values.size(); ++i) {
-            if (m_properties.values[i] != first_property_value) {
-                all_properties_same_value = false;
-                break;
-            }
-        }
-        if (all_properties_same_value)
-            return first_property_value->to_string(mode);
-
-        StringBuilder builder;
-        auto first = true;
-        for (size_t i = 0; i < m_properties.values.size(); ++i) {
-            auto value = m_properties.values[i];
-            auto value_string = value->to_string(mode);
-            auto initial_value_string = property_initial_value(m_properties.sub_properties[i])->to_string(mode);
-            if (value_string == initial_value_string)
-                continue;
-            if (first)
-                first = false;
-            else
-                builder.append(' ');
-            builder.append(value->to_string(mode));
-        }
-        if (builder.is_empty())
-            return m_properties.values.first()->to_string(mode);
-
-        return MUST(builder.to_string());
+        return default_to_string();
     }
 }
 

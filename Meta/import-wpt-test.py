@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 
+import os
+import re
+import sys
+
 from collections import namedtuple
 from dataclasses import dataclass
 from enum import Enum
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
+from urllib.parse import urlparse
 from urllib.request import urlopen
-import re
-import os
-import sys
 
 wpt_base_url = "https://wpt.live/"
 
@@ -163,7 +165,7 @@ def modify_sources(files, resources: list[ResourceAndType]) -> None:
             page_source = f.read()
 
         # Iterate all scripts and overwrite the src attribute
-        for i, resource in enumerate(map(lambda r: r.resource, resources)):
+        for resource in map(lambda r: r.resource, resources):
             if resource.startswith("/"):
                 new_src_value = parent_folder_path + resource[1::]
                 page_source = page_source.replace(resource, new_src_value)

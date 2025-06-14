@@ -4,26 +4,31 @@ on:
   workflow_run:
     workflows: ['Package the js repl as a binary artifact']
     branches: [master]
-    types:
-      - completed
+    types: [completed]
 
 jobs:
   js-benchmarks:
-    runs-on: ['js-benchmarks', 'self-hosted', '${{ matrix.os }}']
+    runs-on: ${{ fromJSON(matrix.runner_labels) }}
     if: ${{ github.repository == 'LadybirdBrowser/ladybird' && github.event.workflow_run.conclusion == 'success' }}
+    name: ${{ matrix.os_name }}, ${{ matrix.arch }}
+
     strategy:
       fail-fast: false
       matrix:
         os_name: ['Linux']
-        os: ['ubuntu-24.04-internal']
         arch: ['x86_64']
         package_type: ['Linux-x86_64']
+        runner_labels: ['["ubuntu-24.04-internal", "js-benchmarks", "self-hosted"]']
 
         include:
           - os_name: 'macOS'
-            os: 'macos-15'
             arch: 'arm64'
-            package_type: 'macOS-universal2'
+            package_type: 'macOS-arm64'
+            runner_labels: '["macos-15", "js-benchmarks", "self-hosted"]'
+
+    permissions:
+      actions: read
+      contents: read
 
     steps:
       - name: 'Checkout LadybirdBrowser/js-benchmarks'
@@ -43,8 +48,7 @@ jobs:
         id: download-artifact
         uses: dawidd6/action-download-artifact@v9
         with:
-          workflow: js-artifacts.yml
-          commit: ${{ github.event.workflow_run.head_sha }}
+          run_id: ${{ github.event.workflow_run.id }}
           name: ladybird-js-${{ matrix.package_type }}
           path: js-repl
 
@@ -77,7 +81,8 @@ jobs:
               "commit": "${{ github.event.workflow_run.head_sha }}",
               "os": "${{ matrix.os_name }}",
               "arch": "${{ matrix.arch }}",
-              "artifact": "js-benchmarks-results-${{ matrix.os_name }}-${{ matrix.arch }}"
+              "artifact": "js-benchmarks-results-${{ matrix.os_name }}-${{ matrix.arch }}",
+              "artifact_run_id": "${{ github.run_id }}"
           }' > request.json
           curl \
               --fail \

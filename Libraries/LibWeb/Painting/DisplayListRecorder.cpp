@@ -310,16 +310,14 @@ void DisplayListRecorder::push_stacking_context(PushStackingContextParams params
             .matrix = params.transform.matrix,
         },
         .clip_path = params.clip_path });
-    m_scroll_frame_id_stack.append({});
 }
 
 void DisplayListRecorder::pop_stacking_context()
 {
-    (void)m_scroll_frame_id_stack.take_last();
     append(PopStackingContext {});
 }
 
-void DisplayListRecorder::apply_backdrop_filter(Gfx::IntRect const& backdrop_region, BorderRadiiData const& border_radii_data, Vector<Gfx::Filter> const& backdrop_filter)
+void DisplayListRecorder::apply_backdrop_filter(Gfx::IntRect const& backdrop_region, BorderRadiiData const& border_radii_data, Gfx::Filter const& backdrop_filter)
 {
     if (backdrop_region.is_empty())
         return;
@@ -402,13 +400,15 @@ void DisplayListRecorder::draw_triangle_wave(Gfx::IntPoint a_p1, Gfx::IntPoint a
         .thickness = thickness });
 }
 
-void DisplayListRecorder::paint_scrollbar(int scroll_frame_id, Gfx::IntRect gutter_rect, Gfx::IntRect thumb_rect, CSSPixelFraction scroll_size, bool vertical)
+void DisplayListRecorder::paint_scrollbar(int scroll_frame_id, Gfx::IntRect gutter_rect, Gfx::IntRect thumb_rect, CSSPixelFraction scroll_size, Color thumb_color, Color track_color, bool vertical)
 {
     append(PaintScrollBar {
         .scroll_frame_id = scroll_frame_id,
         .gutter_rect = gutter_rect,
         .thumb_rect = thumb_rect,
         .scroll_size = scroll_size,
+        .thumb_color = thumb_color,
+        .track_color = track_color,
         .vertical = vertical });
 }
 
@@ -422,9 +422,9 @@ void DisplayListRecorder::apply_compositing_and_blending_operator(Gfx::Compositi
     append(ApplyCompositeAndBlendingOperator { .compositing_and_blending_operator = compositing_and_blending_operator });
 }
 
-void DisplayListRecorder::apply_filters(Vector<Gfx::Filter> filter)
+void DisplayListRecorder::apply_filter(Gfx::Filter filter)
 {
-    append(ApplyFilters { .filter = move(filter) });
+    append(ApplyFilter { .filter = move(filter) });
 }
 
 void DisplayListRecorder::apply_transform(Gfx::FloatPoint origin, Gfx::FloatMatrix4x4 matrix)

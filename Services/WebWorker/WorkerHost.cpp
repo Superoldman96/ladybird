@@ -208,7 +208,7 @@ void WorkerHost::run(GC::Ref<Web::Page> page, Web::HTML::TransferDataHolder mess
 
         // 12. If is shared is false, enable the port message queue of the worker's implicit port.
         if (!is_shared) {
-            inside_port->start();
+            inside_port->enable();
         }
 
         // 13. If is shared is true, then queue a global task on DOM manipulation task source given worker
@@ -244,6 +244,11 @@ void WorkerHost::run(GC::Ref<Web::Page> page, Web::HTML::TransferDataHolder mess
         // FIXME: 18. Empty worker global scope's owner set.
     };
     auto on_complete = Web::HTML::create_on_fetch_script_complete(inside_settings->vm().heap(), move(on_complete_function));
+
+    // AD-HOC: Fetching a script performs actions such as for blobs checking that they are on the same partition
+    //         based on origin. However, this is performed before the consume body algorithm is run, where
+    //         this URL for that worker is set. As a workaround, set the URL upfront.
+    worker_global_scope->set_url(m_url);
 
     // 14. Obtain script by switching on the value of options's type member:
     // classic:  Fetch a classic worker script given url, outside settings, destination, inside settings,

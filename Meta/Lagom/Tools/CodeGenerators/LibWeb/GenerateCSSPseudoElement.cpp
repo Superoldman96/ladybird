@@ -432,12 +432,12 @@ bool pseudo_element_supports_property(PseudoElement pseudo_element, PropertyID p
                 // FIXME: text-spacing
                 // FIXME: text-spacing-trim
                 append_property("text-transform"sv);
-                // FIXME: text-wrap
-                // FIXME: text-wrap-mode
-                // FIXME: text-wrap-style
+                append_property("text-wrap"sv);
+                append_property("text-wrap-mode"sv);
+                append_property("text-wrap-style"sv);
                 append_property("white-space"sv);
-                // FIXME: white-space-collapse
-                // FIXME: white-space-trim
+                append_property("white-space-collapse"sv);
+                append_property("white-space-trim"sv);
                 append_property("word-break"sv);
                 // FIXME: word-space-transform
                 append_property("word-spacing"sv);

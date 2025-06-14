@@ -49,7 +49,7 @@ public:
     };
 
     HashMap<PropertyID, NonnullRefPtr<CSSStyleValue const>> const& animated_property_values() const { return m_animated_property_values; }
-    void reset_animated_properties();
+    void reset_animated_properties(Badge<Animations::KeyframeEffect>);
 
     bool is_property_important(PropertyID property_id) const;
     bool is_property_inherited(PropertyID property_id) const;
@@ -100,7 +100,8 @@ public:
     ContentVisibility content_visibility() const;
     Vector<CursorData> cursor() const;
     Variant<LengthOrCalculated, NumberOrCalculated> tab_size() const;
-    WhiteSpace white_space() const;
+    WhiteSpaceCollapse white_space_collapse() const;
+    WhiteSpaceTrimData white_space_trim() const;
     WordBreak word_break() const;
     Optional<LengthOrCalculated> word_spacing() const;
     Optional<LengthOrCalculated> letter_spacing() const;
@@ -110,6 +111,7 @@ public:
     TextDecorationStyle text_decoration_style() const;
     TextTransform text_transform() const;
     Vector<ShadowData> text_shadow(Layout::Node const&) const;
+    TextWrapMode text_wrap_mode() const;
     ListStyleType list_style_type() const;
     ListStylePosition list_style_position() const;
     FlexDirection flex_direction() const;
@@ -226,6 +228,7 @@ public:
     QuotesData quotes() const;
     Vector<CounterData> counter_data(PropertyID) const;
 
+    ScrollbarColorData scrollbar_color(Layout::NodeWithStyle const& layout_node) const;
     ScrollbarWidth scrollbar_width() const;
 
     static NonnullRefPtr<Gfx::Font const> font_fallback(bool monospace, bool bold, float point_size);
