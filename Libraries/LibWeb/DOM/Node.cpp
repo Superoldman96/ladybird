@@ -575,17 +575,6 @@ String Node::child_text_content() const
     return MUST(builder.to_string());
 }
 
-// https://dom.spec.whatwg.org/#concept-tree-root
-Node& Node::root()
-{
-    // The root of an object is itself, if its parent is null, or else it is the root of its parent.
-    // The root of a tree is any object participating in that tree whose parent is null.
-    Node* root = this;
-    while (root->parent())
-        root = root->parent();
-    return *root;
-}
-
 // https://dom.spec.whatwg.org/#concept-shadow-including-root
 Node& Node::shadow_including_root()
 {
@@ -1634,8 +1623,19 @@ void Node::set_needs_layout_tree_update(bool value, SetNeedsLayoutTreeUpdateReas
                 break;
             ancestor->m_child_needs_layout_tree_update = true;
         }
-        if (auto layout_node = this->layout_node())
+        if (auto layout_node = this->layout_node()) {
             layout_node->set_needs_layout_update(SetNeedsLayoutReason::LayoutTreeUpdate);
+
+            // If the layout node has an anonymous parent, rebuild from the nearest non-anonymous ancestor.
+            // FIXME: This is not optimal, and we should figure out how to rebuild a smaller part of the tree.
+            if (layout_node->parent() && layout_node->parent()->is_anonymous()) {
+                GC::Ptr<Layout::Node> ancestor = layout_node->parent();
+                while (ancestor && ancestor->is_anonymous())
+                    ancestor = ancestor->parent();
+                if (ancestor)
+                    ancestor->dom_node()->set_needs_layout_tree_update(true, reason);
+            }
+        }
     }
 }
 
@@ -1964,13 +1964,6 @@ bool Node::is_scripting_disabled() const
 {
     // Scripting is disabled for a node when scripting is not enabled, i.e., when its node document's browsing context is null or when scripting is disabled for its relevant realm.
     return !is_scripting_enabled();
-}
-
-// https://dom.spec.whatwg.org/#dom-node-contains
-bool Node::contains(GC::Ptr<Node> other) const
-{
-    // The contains(other) method steps are to return true if other is an inclusive descendant of this; otherwise false (including when other is null).
-    return other && other->is_inclusive_descendant_of(*this);
 }
 
 // https://dom.spec.whatwg.org/#concept-shadow-including-descendant
@@ -2575,28 +2568,6 @@ void Node::insert_before_impl(GC::Ref<Node> node, GC::Ptr<Node> child)
 void Node::remove_child_impl(GC::Ref<Node> node)
 {
     TreeNode::remove_child(node);
-}
-
-bool Node::is_descendant_of(Node const& other) const
-{
-    return other.is_ancestor_of(*this);
-}
-
-bool Node::is_inclusive_descendant_of(Node const& other) const
-{
-    return other.is_inclusive_ancestor_of(*this);
-}
-
-// https://dom.spec.whatwg.org/#concept-tree-following
-bool Node::is_following(Node const& other) const
-{
-    // An object A is following an object B if A and B are in the same tree and A comes after B in tree order.
-    for (auto* node = previous_in_pre_order(); node; node = node->previous_in_pre_order()) {
-        if (node == &other)
-            return true;
-    }
-
-    return false;
 }
 
 void Node::build_accessibility_tree(AccessibilityTreeNode& parent)

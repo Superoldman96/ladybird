@@ -58,11 +58,12 @@ ErrorOr<Utf16ConversionResult> utf8_to_utf16(StringView utf8_view, Endianness en
 
 ErrorOr<Utf16ConversionResult> utf8_to_utf16(Utf8View const& utf8_view, Endianness endianness)
 {
+    if (utf8_view.is_empty())
+        return Utf16ConversionResult { Utf16Data {}, 0 };
+
     // All callers want to allow lonely surrogates, which simdutf does not permit.
     if (!utf8_view.validate(Utf8View::AllowSurrogates::No)) [[unlikely]]
         return to_utf16_slow(utf8_view, endianness);
-    if (utf8_view.is_empty())
-        return Utf16ConversionResult { Utf16Data {}, 0 };
 
     auto const* data = reinterpret_cast<char const*>(utf8_view.bytes());
     auto length = utf8_view.byte_length();
@@ -204,7 +205,7 @@ u32 Utf16View::code_point_at(size_t index) const
 
 size_t Utf16View::code_point_offset_of(size_t code_unit_offset) const
 {
-    if (m_length_in_code_points == m_code_units.size()) // Fast path: all code points are one code unit.
+    if (length_in_code_points() == length_in_code_units()) // Fast path: all code points are one code unit.
         return code_unit_offset;
 
     size_t code_point_offset = 0;
@@ -222,7 +223,7 @@ size_t Utf16View::code_point_offset_of(size_t code_unit_offset) const
 
 size_t Utf16View::code_unit_offset_of(size_t code_point_offset) const
 {
-    if (m_length_in_code_points == m_code_units.size()) // Fast path: all code points are one code unit.
+    if (length_in_code_points() == length_in_code_units()) // Fast path: all code points are one code unit.
         return code_point_offset;
 
     size_t code_unit_offset = 0;
@@ -249,7 +250,6 @@ size_t Utf16View::code_unit_offset_of(Utf16CodePointIterator const& it) const
 Utf16View Utf16View::substring_view(size_t code_unit_offset, size_t code_unit_length) const
 {
     VERIFY(!Checked<size_t>::addition_would_overflow(code_unit_offset, code_unit_length));
-    VERIFY(code_unit_offset + code_unit_length <= length_in_code_units());
 
     return Utf16View { m_code_units.slice(code_unit_offset, code_unit_length) };
 }
@@ -259,7 +259,7 @@ Utf16View Utf16View::unicode_substring_view(size_t code_point_offset, size_t cod
     if (code_point_length == 0)
         return {};
 
-    if (m_length_in_code_points == m_code_units.size()) // Fast path: all code points are one code unit.
+    if (length_in_code_points() == length_in_code_units()) // Fast path: all code points are one code unit.
         return substring_view(code_point_offset, code_point_length);
 
     auto code_unit_offset_of = [&](Utf16CodePointIterator const& it) { return it.m_ptr - begin_ptr(); };
@@ -279,6 +279,32 @@ Utf16View Utf16View::unicode_substring_view(size_t code_point_offset, size_t cod
     }
 
     VERIFY_NOT_REACHED();
+}
+
+Optional<size_t> Utf16View::find_code_unit_offset(Utf16View const& needle, size_t start_offset) const
+{
+    return m_code_units.index_of(needle.m_code_units, start_offset);
+}
+
+Optional<size_t> Utf16View::find_code_unit_offset_ignoring_case(Utf16View const& needle, size_t start_offset) const
+{
+    Checked maximum_offset { start_offset };
+    maximum_offset += needle.length_in_code_units();
+    if (maximum_offset.has_overflow() || maximum_offset.value() > length_in_code_units())
+        return {};
+
+    if (needle.is_empty())
+        return start_offset;
+
+    size_t index = start_offset;
+    while (index <= length_in_code_units() - needle.length_in_code_units()) {
+        Utf16View const slice { m_code_units.slice(index, needle.length_in_code_units()) };
+        if (slice.equals_ignoring_case(needle))
+            return index;
+        index += slice.begin().length_in_code_units();
+    }
+
+    return {};
 }
 
 bool Utf16View::starts_with(Utf16View const& needle) const
@@ -344,8 +370,6 @@ size_t Utf16View::calculate_length_in_code_points() const
 
 bool Utf16View::equals_ignoring_case(Utf16View const& other) const
 {
-    if (length_in_code_units() == 0)
-        return other.length_in_code_units() == 0;
     if (length_in_code_units() != other.length_in_code_units())
         return false;
 

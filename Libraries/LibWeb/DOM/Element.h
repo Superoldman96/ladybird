@@ -216,8 +216,6 @@ public:
     void set_pseudo_element_computed_properties(CSS::PseudoElement, GC::Ptr<CSS::ComputedProperties>);
     GC::Ptr<CSS::ComputedProperties> pseudo_element_computed_properties(CSS::PseudoElement);
 
-    void reset_animated_css_properties();
-
     GC::Ptr<CSS::CSSStyleProperties> inline_style() { return m_inline_style; }
     GC::Ptr<CSS::CSSStyleProperties const> inline_style() const { return m_inline_style; }
     void set_inline_style(GC::Ptr<CSS::CSSStyleProperties>);
@@ -274,6 +272,7 @@ public:
 
     virtual void did_receive_focus() { }
     virtual void did_lose_focus() { }
+    bool should_indicate_focus() const;
 
     static GC::Ptr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, GC::Ref<CSS::ComputedProperties>, Element*);
 
@@ -377,6 +376,12 @@ public:
     };
     CSSPixelPoint scroll_offset(ScrollOffsetFor type) const { return m_scroll_offset[to_underlying(type)]; }
     void set_scroll_offset(ScrollOffsetFor type, CSSPixelPoint offset) { m_scroll_offset[to_underlying(type)] = offset; }
+
+    enum class TranslationMode {
+        TranslateEnabled,
+        NoTranslate
+    };
+    TranslationMode translation_mode() const;
 
     enum class Dir {
         Ltr,

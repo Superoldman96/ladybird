@@ -37,7 +37,10 @@ private:
     virtual void visit_edges(Cell::Visitor&) override;
 };
 
+// msvc abi semantics about layout with inheritance differ from Sys-V
+#if !defined(AK_OS_WINDOWS)
 static_assert(sizeof(IteratorRecord) == 32);
+#endif
 
 class Iterator : public Object {
     JS_OBJECT(Iterator, Object);
@@ -71,9 +74,6 @@ class BuiltinIterator {
 public:
     virtual ~BuiltinIterator() = default;
     virtual ThrowCompletionOr<void> next(VM&, bool& done, Value& value) = 0;
-
-protected:
-    bool m_next_method_was_redefined { false };
 };
 
 struct IterationResult {

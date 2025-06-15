@@ -996,57 +996,6 @@ void StyleComputer::for_each_property_expanding_shorthands(PropertyID property_i
     set_longhand_property(property_id, value);
 }
 
-void StyleComputer::set_property_expanding_shorthands(
-    CascadedProperties& cascaded_properties,
-    PropertyID property_id,
-    CSSStyleValue const& value,
-    GC::Ptr<CSSStyleDeclaration const> declaration,
-    CascadeOrigin cascade_origin,
-    Important important,
-    Optional<FlyString> layer_name)
-{
-    for_each_property_expanding_shorthands(property_id, value, [&](PropertyID longhand_id, CSSStyleValue const& longhand_value) {
-        if (longhand_value.is_revert()) {
-            cascaded_properties.revert_property(longhand_id, important, cascade_origin);
-        } else if (longhand_value.is_revert_layer()) {
-            cascaded_properties.revert_layer_property(longhand_id, important, layer_name);
-        } else {
-            cascaded_properties.set_property(longhand_id, longhand_value, important, cascade_origin, layer_name, declaration);
-        }
-    });
-}
-
-void StyleComputer::set_all_properties(
-    CascadedProperties& cascaded_properties,
-    DOM::Element& element,
-    Optional<PseudoElement> pseudo_element,
-    CSSStyleValue const& value,
-    DOM::Document& document,
-    GC::Ptr<CSSStyleDeclaration const> declaration,
-    CascadeOrigin cascade_origin,
-    Important important,
-    Optional<FlyString> layer_name) const
-{
-    for (auto i = to_underlying(CSS::first_longhand_property_id); i <= to_underlying(CSS::last_longhand_property_id); ++i) {
-        auto property_id = (CSS::PropertyID)i;
-
-        if (value.is_revert()) {
-            cascaded_properties.revert_property(property_id, important, cascade_origin);
-            continue;
-        }
-
-        if (value.is_revert_layer()) {
-            cascaded_properties.revert_layer_property(property_id, important, layer_name);
-            continue;
-        }
-
-        NonnullRefPtr<CSSStyleValue const> property_value = value;
-        if (property_value->is_unresolved())
-            property_value = Parser::Parser::resolve_unresolved_style_value(Parser::ParsingParams { document }, element, pseudo_element, property_id, property_value->as_unresolved());
-        set_property_expanding_shorthands(cascaded_properties, property_id, property_value, declaration, cascade_origin, important, layer_name);
-    }
-}
-
 void StyleComputer::cascade_declarations(
     CascadedProperties& cascaded_properties,
     DOM::Element& element,
@@ -1091,12 +1040,6 @@ void StyleComputer::cascade_declarations(
                 }
             }
 
-            if (property.property_id == PropertyID::All) {
-                set_all_properties(cascaded_properties, element, pseudo_element, property_value, m_document, &declaration, cascade_origin, important, layer_name);
-                continue;
-            }
-
-            // NOTE: This is a duplicate of set_property_expanding_shorthands() with some extra checks.
             for_each_property_expanding_shorthands(property.property_id, property_value, [&](PropertyID longhand_id, CSSStyleValue const& longhand_value) {
                 // If we're a PSV that's already been seen, that should mean that our shorthand already got
                 // resolved and gave us a value, so we don't want to overwrite it with a PSV.
@@ -1227,6 +1170,11 @@ void StyleComputer::collect_animation_into(DOM::Element& element, Optional<CSS::
                 continue;
             }
 
+            // If the style value is a PendingSubstitutionStyleValue we should skip it to avoid overwriting any value
+            // already set by resolving the relevant shorthand's value.
+            if (style_value->is_pending_substitution())
+                continue;
+
             if (style_value->is_revert() || style_value->is_revert_layer())
                 style_value = computed_properties.property(property_id);
             if (style_value->is_unresolved())
@@ -1266,7 +1214,7 @@ void StyleComputer::collect_animation_into(DOM::Element& element, Optional<CSS::
             continue;
         }
 
-        if (auto next_value = interpolate_property(*effect->target(), it.key, *start, *end, progress_in_keyframe)) {
+        if (auto next_value = interpolate_property(*effect->target(), it.key, *start, *end, progress_in_keyframe, AllowDiscrete::Yes)) {
             dbgln_if(LIBWEB_CSS_ANIMATION_DEBUG, "Interpolated value for property {} at {}: {} -> {} = {}", string_from_property_id(it.key), progress_in_keyframe, start->to_string(SerializationMode::Normal), end->to_string(SerializationMode::Normal), next_value->to_string(SerializationMode::Normal));
             computed_properties.set_animated_property(it.key, *next_value);
         } else {
@@ -1366,19 +1314,16 @@ static void apply_dimension_attribute(CascadedProperties& cascaded_properties, D
 
 static void compute_transitioned_properties(ComputedProperties const& style, DOM::Element& element, Optional<PseudoElement> pseudo_element)
 {
-    // FIXME: Implement transitioning for pseudo-elements
-    (void)pseudo_element;
-
     auto const source_declaration = style.transition_property_source();
     if (!source_declaration)
         return;
     if (!element.computed_properties())
         return;
-    if (source_declaration == element.cached_transition_property_source())
+    if (source_declaration == element.cached_transition_property_source(pseudo_element))
         return;
     // Reparse this transition property
-    element.clear_transitions();
-    element.set_cached_transition_property_source(*source_declaration);
+    element.clear_transitions(pseudo_element);
+    element.set_cached_transition_property_source(pseudo_element, *source_declaration);
 
     auto const& transition_properties_value = style.property(PropertyID::TransitionProperty);
     auto transition_properties = transition_properties_value.is_value_list()
@@ -1453,15 +1398,12 @@ static void compute_transitioned_properties(ComputedProperties const& style, DOM
         PropertyID::TransitionBehavior,
         [] { return CSSKeywordValue::create(Keyword::None); });
 
-    element.add_transitioned_properties(move(properties), move(delays), move(durations), move(timing_functions), move(transition_behaviors));
+    element.add_transitioned_properties(pseudo_element, move(properties), move(delays), move(durations), move(timing_functions), move(transition_behaviors));
 }
 
 // https://drafts.csswg.org/css-transitions/#starting
 void StyleComputer::start_needed_transitions(ComputedProperties const& previous_style, ComputedProperties& new_style, DOM::Element& element, Optional<PseudoElement> pseudo_element) const
 {
-    // FIXME: Implement transitions for pseudo-elements
-    if (pseudo_element.has_value())
-        return;
 
     // https://drafts.csswg.org/css-transitions/#transition-combined-duration
     auto combined_duration = [](Animations::Animatable::TransitionAttributes const& transition_attributes) {
@@ -1474,21 +1416,21 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
 
     for (auto i = to_underlying(CSS::first_longhand_property_id); i <= to_underlying(CSS::last_longhand_property_id); ++i) {
         auto property_id = static_cast<CSS::PropertyID>(i);
-        auto matching_transition_properties = element.property_transition_attributes(property_id);
-        auto const& before_change_value = previous_style.property(property_id, ComputedProperties::WithAnimationsApplied::No);
+        auto matching_transition_properties = element.property_transition_attributes(pseudo_element, property_id);
+        auto const& before_change_value = previous_style.property(property_id, ComputedProperties::WithAnimationsApplied::Yes);
         auto const& after_change_value = new_style.property(property_id, ComputedProperties::WithAnimationsApplied::No);
 
-        auto existing_transition = element.property_transition(property_id);
+        auto existing_transition = element.property_transition(pseudo_element, property_id);
         bool has_running_transition = existing_transition && !existing_transition->is_finished();
         bool has_completed_transition = existing_transition && existing_transition->is_finished();
 
         auto start_a_transition = [&](auto start_time, auto end_time, auto const& start_value, auto const& end_value, auto const& reversing_adjusted_start_value, auto reversing_shortening_factor) {
             dbgln_if(CSS_TRANSITIONS_DEBUG, "Starting a transition of {} from {} to {}", string_from_property_id(property_id), start_value->to_string(), end_value->to_string());
 
-            auto transition = CSSTransition::start_a_transition(element, property_id, document().transition_generation(),
-                start_time, end_time, start_value, end_value, reversing_adjusted_start_value, reversing_shortening_factor);
+            auto transition = CSSTransition::start_a_transition(element, pseudo_element, property_id,
+                document().transition_generation(), start_time, end_time, start_value, end_value, reversing_adjusted_start_value, reversing_shortening_factor);
             // Immediately set the property's value to the transition's current value, to prevent single-frame jumps.
-            new_style.set_animated_property(property_id, transition->value_at_time(style_change_event_time));
+            collect_animation_into(element, {}, as<Animations::KeyframeEffect>(*transition->effect()), new_style, AnimationRefresh::No);
         };
 
         // 1. If all of the following are true:
@@ -1498,7 +1440,7 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
             // - there is a matching transition-property value, and
             (matching_transition_properties.has_value()) &&
             // - the before-change style is different from the after-change style for that property, and the values for the property are transitionable,
-            (!before_change_value.equals(after_change_value) && property_values_are_transitionable(property_id, before_change_value, after_change_value, matching_transition_properties->transition_behavior)) &&
+            (!before_change_value.equals(after_change_value) && property_values_are_transitionable(property_id, before_change_value, after_change_value, element, matching_transition_properties->transition_behavior)) &&
             // - the element does not have a completed transition for the property
             //   or the end value of the completed transition is different from the after-change style for the property,
             (!has_completed_transition || !existing_transition->transition_end_value()->equals(after_change_value)) &&
@@ -1509,7 +1451,7 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
 
             // then implementations must remove the completed transition (if present) from the set of completed transitions
             if (has_completed_transition)
-                element.remove_transition(property_id);
+                element.remove_transition(pseudo_element, property_id);
             // and start a transition whose:
 
             // - start time is the time of the style change event plus the matching transition delay,
@@ -1538,7 +1480,7 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
         //    then implementations must remove the completed transition from the set of completed transitions.
         else if (has_completed_transition && !existing_transition->transition_end_value()->equals(after_change_value)) {
             dbgln_if(CSS_TRANSITIONS_DEBUG, "Transition step 2.");
-            element.remove_transition(property_id);
+            element.remove_transition(pseudo_element, property_id);
         }
 
         // 3. If the element has a running transition or completed transition for the property,
@@ -1549,7 +1491,7 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
             if (has_running_transition)
                 existing_transition->cancel();
             else
-                element.remove_transition(property_id);
+                element.remove_transition(pseudo_element, property_id);
         }
 
         // 4. If the element has a running transition for the property,
@@ -1560,8 +1502,8 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
             // 1. If the current value of the property in the running transition is equal to the value of the property in the after-change style,
             //    or if these two values are not transitionable,
             //    then implementations must cancel the running transition.
-            auto current_value = existing_transition->value_at_time(style_change_event_time);
-            if (current_value->equals(after_change_value) || !property_values_are_transitionable(property_id, current_value, after_change_value, matching_transition_properties->transition_behavior)) {
+            auto& current_value = new_style.property(property_id, ComputedProperties::WithAnimationsApplied::Yes);
+            if (current_value.equals(after_change_value) || !property_values_are_transitionable(property_id, current_value, after_change_value, element, matching_transition_properties->transition_behavior)) {
                 dbgln_if(CSS_TRANSITIONS_DEBUG, "Transition step 4.1");
                 existing_transition->cancel();
             }
@@ -1570,7 +1512,7 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
             //    or if the current value of the property in the running transition is not transitionable with the value of the property in the after-change style,
             //    then implementations must cancel the running transition.
             else if ((combined_duration(matching_transition_properties.value()) <= 0)
-                || !property_values_are_transitionable(property_id, current_value, after_change_value, matching_transition_properties->transition_behavior)) {
+                || !property_values_are_transitionable(property_id, current_value, after_change_value, element, matching_transition_properties->transition_behavior)) {
                 dbgln_if(CSS_TRANSITIONS_DEBUG, "Transition step 4.2");
                 existing_transition->cancel();
             }
@@ -1583,7 +1525,7 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
                 existing_transition->cancel();
                 // AD-HOC: Remove the cancelled transition, otherwise it breaks the invariant that there is only one
                 // running or completed transition for a property at once.
-                element.remove_transition(property_id);
+                element.remove_transition(pseudo_element, property_id);
 
                 // - reversing-adjusted start value is the end value of the running transition,
                 auto reversing_adjusted_start_value = existing_transition->transition_end_value();
@@ -1623,7 +1565,7 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
                 existing_transition->cancel();
                 // AD-HOC: Remove the cancelled transition, otherwise it breaks the invariant that there is only one
                 // running or completed transition for a property at once.
-                element.remove_transition(property_id);
+                element.remove_transition(pseudo_element, property_id);
 
                 // - start time is the time of the style change event plus the matching transition delay,
                 auto start_time = style_change_event_time + matching_transition_properties->delay;
@@ -2238,7 +2180,8 @@ void StyleComputer::compute_font(ComputedProperties& style, DOM::Element const* 
 Gfx::Font const& StyleComputer::initial_font() const
 {
     // FIXME: This is not correct.
-    return ComputedProperties::font_fallback(false, false, 12);
+    static auto font = ComputedProperties::font_fallback(false, false, 12);
+    return font;
 }
 
 void StyleComputer::absolutize_values(ComputedProperties& style, GC::Ptr<DOM::Element const> element) const
@@ -2683,6 +2626,8 @@ GC::Ref<ComputedProperties> StyleComputer::compute_properties(DOM::Element& elem
     auto animation_name = [&]() -> Optional<String> {
         auto const animation_name = computed_style->maybe_null_property(PropertyID::AnimationName);
         if (!animation_name)
+            return OptionalNone {};
+        if (animation_name->is_keyword() && animation_name->to_keyword() == Keyword::None)
             return OptionalNone {};
         if (animation_name->is_string())
             return animation_name->as_string().string_value().to_string();

@@ -417,6 +417,7 @@ private:
     RefPtr<CSSStyleValue const> parse_place_items_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_place_self_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_quotes_value(TokenStream<ComponentValue>&);
+    RefPtr<CSSStyleValue const> parse_scrollbar_color_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_scrollbar_gutter_value(TokenStream<ComponentValue>&);
     enum class AllowInsetKeyword {
         No,
@@ -445,6 +446,8 @@ private:
     RefPtr<CSSStyleValue const> parse_grid_area_shorthand_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_grid_shorthand_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_touch_action_value(TokenStream<ComponentValue>&);
+    RefPtr<CSSStyleValue const> parse_white_space_shorthand(TokenStream<ComponentValue>&);
+    RefPtr<CSSStyleValue const> parse_white_space_trim_value(TokenStream<ComponentValue>&);
 
     RefPtr<CSSStyleValue const> parse_list_of_time_values(PropertyID, TokenStream<ComponentValue>&);
 

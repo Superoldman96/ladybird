@@ -30,6 +30,7 @@
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CrossOrigin/OpenerPolicy.h>
 #include <LibWeb/HTML/DocumentReadyState.h>
+#include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/History.h>
 #include <LibWeb/HTML/LazyLoadingElement.h>
@@ -433,6 +434,9 @@ public:
 
     void set_focused_element(GC::Ptr<Element>);
 
+    HTML::FocusTrigger last_focus_trigger() const { return m_last_focus_trigger; }
+    void set_last_focus_trigger(HTML::FocusTrigger trigger) { m_last_focus_trigger = trigger; }
+
     Element const* active_element() const { return m_active_element.ptr(); }
     void set_active_element(GC::Ptr<Element>);
 
@@ -814,7 +818,7 @@ public:
     // Does document represent an embedded svg img
     [[nodiscard]] bool is_decoded_svg() const;
 
-    Vector<GC::Root<DOM::Range>> find_matching_text(String const&, CaseSensitivity);
+    Vector<GC::Root<Range>> find_matching_text(String const&, CaseSensitivity);
 
     void parse_html_from_a_string(StringView);
     static GC::Ref<Document> parse_html_unsafe(JS::VM&, StringView);
@@ -1013,6 +1017,8 @@ private:
     bool m_editable { false };
 
     GC::Ptr<Element> m_focused_element;
+    HTML::FocusTrigger m_last_focus_trigger { HTML::FocusTrigger::Other };
+
     GC::Ptr<Element> m_active_element;
     GC::Ptr<Element> m_target_element;
 

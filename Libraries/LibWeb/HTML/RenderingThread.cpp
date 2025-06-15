@@ -26,9 +26,11 @@ RenderingThread::RenderingThread()
 
 RenderingThread::~RenderingThread()
 {
-    m_exit = true;
-    m_rendering_task_ready_wake_condition.signal();
-    (void)m_thread->join();
+    // Note: Promise rejection is expected to signal the thread to exit.
+    m_main_thread_exit_promise->reject(Error::from_errno(ECANCELED));
+    if (m_thread) {
+        (void)m_thread->join();
+    }
 }
 
 void RenderingThread::start(DisplayListPlayerType display_list_player_type)

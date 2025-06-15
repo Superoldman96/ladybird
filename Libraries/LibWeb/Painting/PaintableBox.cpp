@@ -24,6 +24,7 @@
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/SVGPaintable.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
+#include <LibWeb/Painting/ShadowPainting.h>
 #include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/Painting/TableBordersPainting.h>
 #include <LibWeb/Painting/TextPaintable.h>
@@ -479,16 +480,16 @@ void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
     }
 
     if (phase == PaintPhase::Overlay && (g_paint_viewport_scrollbars || !is_viewport()) && computed_values().scrollbar_width() != CSS::ScrollbarWidth::None) {
+        auto scrollbar_colors = computed_values().scrollbar_color();
         if (auto scrollbar_data = compute_scrollbar_data(ScrollDirection::Vertical); scrollbar_data.has_value()) {
             auto gutter_rect = context.rounded_device_rect(scrollbar_data->gutter_rect).to_type<int>();
             auto thumb_rect = context.rounded_device_rect(scrollbar_data->thumb_rect).to_type<int>();
-            context.display_list_recorder().paint_scrollbar(own_scroll_frame_id().value(), gutter_rect, thumb_rect, scrollbar_data->scroll_length, true);
+            context.display_list_recorder().paint_scrollbar(own_scroll_frame_id().value(), gutter_rect, thumb_rect, scrollbar_data->scroll_length, scrollbar_colors.thumb_color, scrollbar_colors.track_color, true);
         }
-
         if (auto scrollbar_data = compute_scrollbar_data(ScrollDirection::Horizontal); scrollbar_data.has_value()) {
             auto gutter_rect = context.rounded_device_rect(scrollbar_data->gutter_rect).to_type<int>();
             auto thumb_rect = context.rounded_device_rect(scrollbar_data->thumb_rect).to_type<int>();
-            context.display_list_recorder().paint_scrollbar(own_scroll_frame_id().value(), gutter_rect, thumb_rect, scrollbar_data->scroll_length, false);
+            context.display_list_recorder().paint_scrollbar(own_scroll_frame_id().value(), gutter_rect, thumb_rect, scrollbar_data->scroll_length, scrollbar_colors.thumb_color, scrollbar_colors.track_color, false);
         }
     }
 
@@ -572,14 +573,14 @@ void PaintableBox::paint_border(PaintContext& context) const
 void PaintableBox::paint_backdrop_filter(PaintContext& context) const
 {
     auto const& backdrop_filter = computed_values().backdrop_filter();
-    if (backdrop_filter.is_empty()) {
+    if (!backdrop_filter.has_value()) {
         return;
     }
 
     auto backdrop_region = context.rounded_device_rect(absolute_border_box_rect());
     auto border_radii_data = normalized_border_radii_data();
     ScopedCornerRadiusClip corner_clipper { context, backdrop_region, border_radii_data };
-    context.display_list_recorder().apply_backdrop_filter(backdrop_region.to_type<int>(), border_radii_data, backdrop_filter);
+    context.display_list_recorder().apply_backdrop_filter(backdrop_region.to_type<int>(), border_radii_data, backdrop_filter.value());
 }
 
 void PaintableBox::paint_background(PaintContext& context) const
@@ -669,7 +670,14 @@ void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintabl
         return;
 
     // NOTE: This checks if the cursor is before the start or after the end of the fragment. If it is at the end, after all text, it should still be painted.
-    if (cursor_position->offset() < (unsigned)fragment.start() || cursor_position->offset() > (unsigned)(fragment.start() + fragment.length()))
+    size_t cursor_position_byte_offset = 0;
+    if (cursor_position->offset() == fragment.utf16_view().length_in_code_units()) {
+        cursor_position_byte_offset = fragment.utf8_view().byte_length();
+    } else {
+        auto cursor_position_code_point_offset = fragment.utf16_view().code_point_offset_of(cursor_position->offset());
+        cursor_position_byte_offset = fragment.utf8_view().byte_offset_of(cursor_position_code_point_offset);
+    }
+    if (cursor_position_byte_offset < fragment.start_byte_offset() || cursor_position_byte_offset > (fragment.start_byte_offset() + fragment.length_in_bytes()))
         return;
 
     auto active_element = document.active_element();
@@ -686,10 +694,12 @@ void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintabl
 
     auto fragment_rect = fragment.absolute_rect();
 
-    auto text = fragment.string_view();
     auto const& font = fragment.glyph_run() ? fragment.glyph_run()->font() : fragment.layout_node().first_available_font();
+    auto utf8_text = fragment.utf8_view();
+    auto cursor_offset = font.width(utf8_text.substring_view(fragment.start_byte_offset(), cursor_position_byte_offset - fragment.start_byte_offset()));
+
     CSSPixelRect cursor_rect {
-        fragment_rect.x() + CSSPixels::nearest_value_for(font.width(text.substring_view(0, document.cursor_position()->offset() - fragment.start()))),
+        fragment_rect.x() + CSSPixels::nearest_value_for(cursor_offset),
         fragment_rect.top(),
         1,
         fragment_rect.height()
@@ -1181,7 +1191,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
         if (fragment_absolute_rect.contains(transformed_position_adjusted_by_scroll_offset)) {
             if (fragment.paintable().hit_test(transformed_position_adjusted_by_scroll_offset, type, callback) == TraversalDecision::Break)
                 return TraversalDecision::Break;
-            HitTestResult hit_test_result { const_cast<Paintable&>(fragment.paintable()), fragment.text_index_at(transformed_position_adjusted_by_scroll_offset), 0, 0 };
+            HitTestResult hit_test_result { const_cast<Paintable&>(fragment.paintable()), fragment.index_in_node_for_point(transformed_position_adjusted_by_scroll_offset), 0, 0 };
             if (callback(hit_test_result) == TraversalDecision::Break)
                 return TraversalDecision::Break;
         } else if (type == HitTestType::TextCursor) {
@@ -1207,7 +1217,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                 if (fragment_absolute_rect.bottom() - 1 <= transformed_position_adjusted_by_scroll_offset.y()) { // fully below the fragment
                     HitTestResult hit_test_result {
                         .paintable = const_cast<Paintable&>(fragment.paintable()),
-                        .index_in_node = fragment.start() + fragment.length(),
+                        .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset() + fragment.length_in_bytes()),
                         .vertical_distance = transformed_position_adjusted_by_scroll_offset.y() - fragment_absolute_rect.bottom(),
                     };
                     if (callback(hit_test_result) == TraversalDecision::Break)
@@ -1216,7 +1226,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                     if (transformed_position_adjusted_by_scroll_offset.x() < fragment_absolute_rect.left()) {
                         HitTestResult hit_test_result {
                             .paintable = const_cast<Paintable&>(fragment.paintable()),
-                            .index_in_node = fragment.start(),
+                            .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset()),
                             .vertical_distance = 0,
                             .horizontal_distance = fragment_absolute_rect.left() - transformed_position_adjusted_by_scroll_offset.x(),
                         };
@@ -1225,7 +1235,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                     } else if (transformed_position_adjusted_by_scroll_offset.x() > fragment_absolute_rect.right()) {
                         HitTestResult hit_test_result {
                             .paintable = const_cast<Paintable&>(fragment.paintable()),
-                            .index_in_node = fragment.start() + fragment.length(),
+                            .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset() + fragment.length_in_bytes()),
                             .vertical_distance = 0,
                             .horizontal_distance = transformed_position_adjusted_by_scroll_offset.x() - fragment_absolute_rect.right(),
                         };

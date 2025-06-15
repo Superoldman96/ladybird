@@ -193,6 +193,7 @@ set(SOURCES
     CSS/StyleValues/PositionStyleValue.cpp
     CSS/StyleValues/RadialGradientStyleValue.cpp
     CSS/StyleValues/RectStyleValue.cpp
+    CSS/StyleValues/ScrollbarColorStyleValue.cpp
     CSS/StyleValues/ShadowStyleValue.cpp
     CSS/StyleValues/ShorthandStyleValue.cpp
     CSS/StyleValues/StyleValueList.cpp
@@ -542,6 +543,7 @@ set(SOURCES
     HTML/TextTrackCue.cpp
     HTML/TextTrackCueList.cpp
     HTML/TextTrackList.cpp
+    HTML/TextTrackObserver.cpp
     HTML/Timer.cpp
     HTML/TimeRanges.cpp
     HTML/ToggleEvent.cpp
@@ -737,6 +739,7 @@ set(SOURCES
     ResourceTiming/PerformanceResourceTiming.cpp
     SecureContexts/AbstractOperations.cpp
     Selection/Selection.cpp
+    ServiceWorker/CacheStorage.cpp
     ServiceWorker/EventNames.cpp
     ServiceWorker/Job.cpp
     ServiceWorker/Registration.cpp
