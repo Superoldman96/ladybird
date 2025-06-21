@@ -15,7 +15,9 @@
 #include <AK/InsertionSort.h>
 #include <AK/StringBuilder.h>
 #include <AK/TemporaryChange.h>
+#include <AK/Time.h>
 #include <AK/Utf8View.h>
+#include <LibCore/DateTime.h>
 #include <LibCore/Timer.h>
 #include <LibGC/RootVector.h>
 #include <LibJS/Runtime/Array.h>
@@ -316,7 +318,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
             top_level_creation_url = parent_environment.top_level_creation_url;
 
             // 3. Set topLevelOrigin to parentEnvironment's top-level origin.
-            top_level_origin = parent_environment.top_level_origin;
+            top_level_origin = parent_environment.top_level_origin.value();
         }
 
         // 10. Set up a window environment settings object with creationURL, realm execution context,
@@ -373,8 +375,12 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     document->m_window = window;
 
     // NOTE: Non-standard: Pull out the Last-Modified header for use in the lastModified property.
-    if (auto maybe_last_modified = navigation_params.response->header_list()->get("Last-Modified"sv.bytes()); maybe_last_modified.has_value())
-        document->m_last_modified = Core::DateTime::parse("%a, %d %b %Y %H:%M:%S %Z"sv, maybe_last_modified.value());
+    if (auto maybe_last_modified = navigation_params.response->header_list()->get("Last-Modified"sv.bytes()); maybe_last_modified.has_value()) {
+        auto last_modified_datetime = Core::DateTime::parse("%a, %d %b %Y %H:%M:%S %Z"sv, maybe_last_modified.value());
+        document->m_last_modified = last_modified_datetime.has_value()
+            ? AK::UnixDateTime::from_seconds_since_epoch(last_modified_datetime.value().timestamp())
+            : Optional<AK::UnixDateTime>();
+    }
 
     // NOTE: Non-standard: Pull out the Content-Language header to determine the document's language.
     if (auto maybe_http_content_language = navigation_params.response->header_list()->get("Content-Language"sv.bytes()); maybe_http_content_language.has_value()) {
@@ -424,9 +430,13 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     return document;
 }
 
-WebIDL::ExceptionOr<GC::Ref<Document>> Document::construct_impl(JS::Realm& realm)
+// https://dom.spec.whatwg.org/#dom-document-document
+GC::Ref<Document> Document::construct_impl(JS::Realm& realm)
 {
-    return Document::create(realm);
+    // The new Document() constructor steps are to set this’s origin to the origin of current global object’s associated Document. [HTML]
+    auto document = Document::create(realm);
+    document->set_origin(as<HTML::Window>(HTML::current_principal_global_object()).associated_document().origin());
+    return document;
 }
 
 GC::Ref<Document> Document::create(JS::Realm& realm, URL::URL const& url)
@@ -840,7 +850,7 @@ GC::Ptr<HTML::WindowProxy const> Document::default_view() const
 
 URL::Origin const& Document::origin() const
 {
-    return m_origin;
+    return m_origin.value();
 }
 
 void Document::set_origin(URL::Origin const& origin)
@@ -1414,6 +1424,18 @@ void Document::update_layout(UpdateLayoutReason reason)
         paintable()->recompute_selection_states(*range);
     }
 
+    // Collect elements with content-visibility: auto. This is used in the HTML event loop to avoid traversing the whole tree every time.
+    Vector<GC::Ref<Painting::PaintableBox>> paintable_boxes_with_auto_content_visibility;
+    paintable()->for_each_in_subtree_of_type<Painting::PaintableBox>([&](auto& paintable_box) {
+        if (paintable_box.dom_node()
+            && paintable_box.dom_node()->is_element()
+            && paintable_box.computed_values().content_visibility() == CSS::ContentVisibility::Auto) {
+            paintable_boxes_with_auto_content_visibility.append(paintable_box);
+        }
+        return TraversalDecision::Continue;
+    });
+    paintable()->set_paintable_boxes_with_auto_content_visibility(move(paintable_boxes_with_auto_content_visibility));
+
     m_layout_root->for_each_in_inclusive_subtree([](auto& node) {
         node.reset_needs_layout_update();
         return TraversalDecision::Continue;
@@ -1571,8 +1593,6 @@ void Document::update_animated_style_if_needed()
             if (animation->is_idle() || animation->is_finished())
                 continue;
             if (auto effect = animation->effect()) {
-                if (auto* target = effect->target())
-                    target->reset_animated_css_properties();
                 effect->update_computed_properties();
             }
         }
@@ -1771,7 +1791,8 @@ void Document::invalidate_style_of_elements_affected_by_has()
         return;
     }
 
-    for (auto const& node : m_pending_nodes_for_style_invalidation_due_to_presence_of_has) {
+    auto nodes = move(m_pending_nodes_for_style_invalidation_due_to_presence_of_has);
+    for (auto const& node : nodes) {
         if (node.is_null())
             continue;
         for (auto* ancestor = node.ptr(); ancestor; ancestor = ancestor->parent_or_shadow_host()) {
@@ -2091,8 +2112,8 @@ HTML::EnvironmentSettingsObject& Document::relevant_settings_object() const
 // https://dom.spec.whatwg.org/#dom-document-createelement
 WebIDL::ExceptionOr<GC::Ref<Element>> Document::create_element(String const& local_name, Variant<String, ElementCreationOptions> const& options)
 {
-    // 1. If localName does not match the Name production, then throw an "InvalidCharacterError" DOMException.
-    if (!is_valid_name(local_name))
+    // 1. If localName is not a valid element local name, then throw an "InvalidCharacterError" DOMException.
+    if (!is_valid_element_local_name(local_name))
         return WebIDL::InvalidCharacterError::create(realm(), "Invalid character in tag name."_string);
 
     // 2. If this is an HTML document, then set localName to localName in ASCII lowercase.
@@ -2123,8 +2144,8 @@ WebIDL::ExceptionOr<GC::Ref<Element>> Document::create_element(String const& loc
 // https://dom.spec.whatwg.org/#internal-createelementns-steps
 WebIDL::ExceptionOr<GC::Ref<Element>> Document::create_element_ns(Optional<FlyString> const& namespace_, String const& qualified_name, Variant<String, ElementCreationOptions> const& options)
 {
-    // 1. Let namespace, prefix, and localName be the result of passing namespace and qualifiedName to validate and extract.
-    auto extracted_qualified_name = TRY(validate_and_extract(realm(), namespace_, qualified_name));
+    // 1. Let (namespace, prefix, localName) be the result of validating and extracting namespace and qualifiedName given "element".
+    auto extracted_qualified_name = TRY(validate_and_extract(realm(), namespace_, qualified_name, ValidationContext::Element));
 
     // 2. Let is be null.
     Optional<String> is_value;
@@ -3055,7 +3076,7 @@ String Document::last_modified() const
     if (m_last_modified.has_value())
         return MUST(m_last_modified.value().to_string(format_string));
 
-    return MUST(Core::DateTime::now().to_string(format_string));
+    return MUST(AK::UnixDateTime::now().to_string(format_string));
 }
 
 Page& Document::page()
@@ -3587,55 +3608,6 @@ bool Document::is_valid_name(String const& name)
     }
 
     return true;
-}
-
-// https://dom.spec.whatwg.org/#validate
-WebIDL::ExceptionOr<Document::PrefixAndTagName> Document::validate_qualified_name(JS::Realm& realm, FlyString const& qualified_name)
-{
-    if (qualified_name.is_empty())
-        return WebIDL::InvalidCharacterError::create(realm, "Empty string is not a valid qualified name."_string);
-
-    auto utf8view = qualified_name.code_points();
-
-    Optional<size_t> colon_offset;
-
-    bool at_start_of_name = true;
-
-    for (auto it = utf8view.begin(); it != utf8view.end(); ++it) {
-        auto code_point = *it;
-        if (code_point == ':') {
-            if (colon_offset.has_value())
-                return WebIDL::InvalidCharacterError::create(realm, "More than one colon (:) in qualified name."_string);
-            colon_offset = utf8view.byte_offset_of(it);
-            at_start_of_name = true;
-            continue;
-        }
-        if (at_start_of_name) {
-            if (!is_valid_name_start_character(code_point))
-                return WebIDL::InvalidCharacterError::create(realm, "Invalid start of qualified name."_string);
-            at_start_of_name = false;
-            continue;
-        }
-        if (!is_valid_name_character(code_point))
-            return WebIDL::InvalidCharacterError::create(realm, "Invalid character in qualified name."_string);
-    }
-
-    if (!colon_offset.has_value())
-        return Document::PrefixAndTagName {
-            .prefix = {},
-            .tag_name = qualified_name,
-        };
-
-    if (*colon_offset == 0)
-        return WebIDL::InvalidCharacterError::create(realm, "Qualified name can't start with colon (:)."_string);
-
-    if (*colon_offset >= (qualified_name.bytes_as_string_view().length() - 1))
-        return WebIDL::InvalidCharacterError::create(realm, "Qualified name can't end with colon (:)."_string);
-
-    return Document::PrefixAndTagName {
-        .prefix = MUST(FlyString::from_utf8(qualified_name.bytes_as_string_view().substring_view(0, *colon_offset))),
-        .tag_name = MUST(FlyString::from_utf8(qualified_name.bytes_as_string_view().substring_view(*colon_offset + 1))),
-    };
 }
 
 // https://dom.spec.whatwg.org/#dom-document-createnodeiterator
@@ -4480,8 +4452,8 @@ String Document::dump_accessibility_tree_as_json()
 // https://dom.spec.whatwg.org/#dom-document-createattribute
 WebIDL::ExceptionOr<GC::Ref<Attr>> Document::create_attribute(String const& local_name)
 {
-    // 1. If localName does not match the Name production in XML, then throw an "InvalidCharacterError" DOMException.
-    if (!is_valid_name(local_name))
+    // 1. If localName is not a valid attribute local name, then throw an "InvalidCharacterError" DOMException.
+    if (!is_valid_attribute_local_name(local_name))
         return WebIDL::InvalidCharacterError::create(realm(), "Invalid character in attribute name."_string);
 
     // 2. If this is an HTML document, then set localName to localName in ASCII lowercase.
@@ -4492,11 +4464,10 @@ WebIDL::ExceptionOr<GC::Ref<Attr>> Document::create_attribute(String const& loca
 // https://dom.spec.whatwg.org/#dom-document-createattributens
 WebIDL::ExceptionOr<GC::Ref<Attr>> Document::create_attribute_ns(Optional<FlyString> const& namespace_, String const& qualified_name)
 {
-    // 1. Let namespace, prefix, and localName be the result of passing namespace and qualifiedName to validate and extract.
-    auto extracted_qualified_name = TRY(validate_and_extract(realm(), namespace_, qualified_name));
+    // 1. Let (namespace, prefix, localName) be the result of validating and extracting namespace and qualifiedName given "attribute".
+    auto extracted_qualified_name = TRY(validate_and_extract(realm(), namespace_, qualified_name, ValidationContext::Attribute));
 
     // 2. Return a new attribute whose namespace is namespace, namespace prefix is prefix, local name is localName, and node document is this.
-
     return Attr::create(*this, extracted_qualified_name);
 }
 
@@ -4624,11 +4595,7 @@ void Document::queue_intersection_observer_task()
         m_intersection_observer_task_queued = false;
 
         // 2. Let notify list be a list of all IntersectionObservers whose root is in the DOM tree of document.
-        Vector<GC::Root<IntersectionObserver::IntersectionObserver>> notify_list;
-        notify_list.try_ensure_capacity(m_intersection_observers.size()).release_value_but_fixme_should_propagate_errors();
-        for (auto& observer : m_intersection_observers) {
-            notify_list.append(GC::make_root(observer));
-        }
+        auto notify_list = GC::RootVector { heap(), m_intersection_observers.values() };
 
         // 3. For each IntersectionObserver object observer in notify list, run these steps:
         for (auto& observer : notify_list) {
@@ -4710,10 +4677,7 @@ void Document::run_the_update_intersection_observations_steps(HighResolutionTime
     // 2. For each observer in observer list:
 
     // NOTE: We make a copy of the intersection observers list to avoid modifying it while iterating.
-    GC::RootVector<GC::Ref<IntersectionObserver::IntersectionObserver>> intersection_observers(heap());
-    intersection_observers.ensure_capacity(m_intersection_observers.size());
-    for (auto& observer : m_intersection_observers)
-        intersection_observers.append(observer);
+    auto intersection_observers = GC::RootVector { heap(), m_intersection_observers.values() };
 
     for (auto& observer : intersection_observers) {
         // 1. Let rootBounds be observer’s root intersection rectangle.
@@ -5241,7 +5205,9 @@ void Document::update_animations_and_send_events(Optional<double> const& timesta
     //   updated.
     // - Queueing animation events for any such animations.
     m_last_animation_frame_timestamp = timestamp;
-    for (auto const& timeline : m_associated_animation_timelines)
+
+    auto timelines_to_update = GC::RootVector { heap(), m_associated_animation_timelines.values() };
+    for (auto const& timeline : timelines_to_update)
         timeline->set_current_time(timestamp);
 
     // 2. Remove replaced animations for doc.
@@ -5297,8 +5263,9 @@ void Document::update_animations_and_send_events(Optional<double> const& timesta
     for (auto const& event : events_to_dispatch)
         event.target->dispatch_event(event.event);
 
-    for (auto& timeline : m_associated_animation_timelines) {
-        for (auto& animation : timeline->associated_animations())
+    for (auto& timeline : timelines_to_update) {
+        auto animations_to_dispatch = GC::RootVector { heap(), timeline->associated_animations().values() };
+        for (auto& animation : animations_to_dispatch)
             dispatch_events_for_animation_if_necessary(animation);
     }
 }
@@ -5827,11 +5794,7 @@ size_t Document::broadcast_active_resize_observations()
     // 2. For each observer in document.[[resizeObservers]] run these steps:
 
     // NOTE: We make a copy of the resize observers list to avoid modifying it while iterating.
-    GC::RootVector<GC::Ref<ResizeObserver::ResizeObserver>> resize_observers(heap());
-    resize_observers.ensure_capacity(m_resize_observers.size());
-    for (auto const& observer : m_resize_observers)
-        resize_observers.append(observer);
-
+    auto resize_observers = GC::RootVector { heap(), m_resize_observers };
     for (auto const& observer : resize_observers) {
         // 1. If observer.[[activeTargets]] slot is empty, continue.
         if (observer->active_targets().is_empty()) {
@@ -6120,12 +6083,17 @@ void Document::process_top_layer_removals()
 {
     // 1. For each element el in doc’s pending top layer removals: if el’s computed value of overlay is none, or el is
     //    not rendered, remove el from doc’s top layer and pending top layer removals.
+    GC::RootVector<GC::Ref<Element>> elements_to_remove(heap());
     for (auto& element : m_top_layer_pending_removals) {
         // FIXME: Implement overlay property
-        if (true || !element->paintable()) {
-            m_top_layer_elements.remove(element);
-            m_top_layer_pending_removals.remove(element);
+        if (!element->paintable()) {
+            elements_to_remove.append(element);
         }
+    }
+
+    for (auto& element : elements_to_remove) {
+        m_top_layer_elements.remove(element);
+        m_top_layer_pending_removals.remove(element);
     }
 }
 
@@ -6152,7 +6120,7 @@ void Document::set_needs_to_refresh_scroll_state(bool b)
         paintable->set_needs_to_refresh_scroll_state(b);
 }
 
-Vector<GC::Root<DOM::Range>> Document::find_matching_text(String const& query, CaseSensitivity case_sensitivity)
+Vector<GC::Root<Range>> Document::find_matching_text(String const& query, CaseSensitivity case_sensitivity)
 {
     // Ensure the layout tree exists before searching for text matches.
     update_layout(UpdateLayoutReason::DocumentFindMatchingText);
@@ -6164,16 +6132,19 @@ Vector<GC::Root<DOM::Range>> Document::find_matching_text(String const& query, C
     if (text_blocks.is_empty())
         return {};
 
-    Vector<GC::Root<DOM::Range>> matches;
+    auto utf16_query = MUST(AK::utf8_to_utf16(query));
+    Utf16View query_view { utf16_query };
+
+    Vector<GC::Root<Range>> matches;
     for (auto const& text_block : text_blocks) {
         size_t offset = 0;
         size_t i = 0;
-        auto const& text = text_block.text;
-        auto* match_start_position = &text_block.positions[0];
+        Utf16View text_view { text_block.text };
+        auto* match_start_position = text_block.positions.data();
         while (true) {
             auto match_index = case_sensitivity == CaseSensitivity::CaseInsensitive
-                ? text.find_byte_offset_ignoring_case(query, offset)
-                : text.find_byte_offset(query, offset);
+                ? text_view.find_code_unit_offset_ignoring_case(query_view, offset)
+                : text_view.find_code_unit_offset(query_view, offset);
             if (!match_index.has_value())
                 break;
 
@@ -6184,16 +6155,16 @@ Vector<GC::Root<DOM::Range>> Document::find_matching_text(String const& query, C
             auto& start_dom_node = match_start_position->dom_node;
 
             auto* match_end_position = match_start_position;
-            for (; i < text_block.positions.size() - 1 && (match_index.value() + query.bytes_as_string_view().length() > text_block.positions[i + 1].start_offset); ++i)
+            for (; i < text_block.positions.size() - 1 && (match_index.value() + query_view.length_in_code_units() > text_block.positions[i + 1].start_offset); ++i)
                 match_end_position = &text_block.positions[i + 1];
 
             auto& end_dom_node = match_end_position->dom_node;
-            auto end_position = match_index.value() + query.bytes_as_string_view().length() - match_end_position->start_offset;
+            auto end_position = match_index.value() + query_view.length_in_code_units() - match_end_position->start_offset;
 
             matches.append(Range::create(start_dom_node, start_position, end_dom_node, end_position));
             match_start_position = match_end_position;
-            offset = match_index.value() + query.bytes_as_string_view().length() + 1;
-            if (offset >= text.bytes_as_string_view().length())
+            offset = match_index.value() + query_view.length_in_code_units() + 1;
+            if (offset >= text_view.length_in_code_units())
                 break;
         }
     }
@@ -6310,9 +6281,12 @@ GC::Ptr<DOM::Position> Document::cursor_position() const
         return nullptr;
 
     Optional<HTML::FormAssociatedTextControlElement const&> target {};
-    if (is<HTML::HTMLInputElement>(*focused_element))
-        target = static_cast<HTML::HTMLInputElement const&>(*focused_element);
-    else if (is<HTML::HTMLTextAreaElement>(*focused_element))
+    if (auto const* input_element = as_if<HTML::HTMLInputElement>(*focused_element)) {
+        // Some types of <input> tags shouldn't have a cursor, like buttons
+        if (!input_element->can_have_text_editing_cursor())
+            return nullptr;
+        target = *input_element;
+    } else if (is<HTML::HTMLTextAreaElement>(*focused_element))
         target = static_cast<HTML::HTMLTextAreaElement const&>(*focused_element);
 
     if (target.has_value())

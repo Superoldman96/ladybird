@@ -24,6 +24,7 @@
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/SVGPaintable.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
+#include <LibWeb/Painting/ShadowPainting.h>
 #include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/Painting/TableBordersPainting.h>
 #include <LibWeb/Painting/TextPaintable.h>
@@ -95,15 +96,13 @@ CSSPixelPoint PaintableBox::scroll_offset() const
     }
 
     auto const& node = layout_node();
-    if (node.is_generated_for_before_pseudo_element())
-        return node.pseudo_element_generator()->scroll_offset(DOM::Element::ScrollOffsetFor::PseudoBefore);
-    if (node.is_generated_for_after_pseudo_element())
-        return node.pseudo_element_generator()->scroll_offset(DOM::Element::ScrollOffsetFor::PseudoAfter);
+    if (auto pseudo_element = node.generated_for_pseudo_element(); pseudo_element.has_value())
+        return node.pseudo_element_generator()->scroll_offset(*pseudo_element);
 
     if (!(dom_node() && is<DOM::Element>(*dom_node())))
         return {};
 
-    return static_cast<DOM::Element const*>(dom_node())->scroll_offset(DOM::Element::ScrollOffsetFor::Self);
+    return static_cast<DOM::Element const*>(dom_node())->scroll_offset({});
 }
 
 void PaintableBox::set_scroll_offset(CSSPixelPoint offset)
@@ -126,12 +125,10 @@ void PaintableBox::set_scroll_offset(CSSPixelPoint offset)
         return;
 
     auto& node = layout_node();
-    if (node.is_generated_for_before_pseudo_element()) {
-        node.pseudo_element_generator()->set_scroll_offset(DOM::Element::ScrollOffsetFor::PseudoBefore, offset);
-    } else if (node.is_generated_for_after_pseudo_element()) {
-        node.pseudo_element_generator()->set_scroll_offset(DOM::Element::ScrollOffsetFor::PseudoAfter, offset);
+    if (auto pseudo_element = node.generated_for_pseudo_element(); pseudo_element.has_value()) {
+        node.pseudo_element_generator()->set_scroll_offset(*pseudo_element, offset);
     } else if (is<DOM::Element>(*dom_node())) {
-        static_cast<DOM::Element*>(dom_node())->set_scroll_offset(DOM::Element::ScrollOffsetFor::Self, offset);
+        static_cast<DOM::Element*>(dom_node())->set_scroll_offset({}, offset);
     } else {
         return;
     }
@@ -436,7 +433,11 @@ void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
     if (!is_visible())
         return;
 
-    if (phase == PaintPhase::Background) {
+    auto empty_cells_property_applies = [this]() {
+        return display().is_internal_table() && computed_values().empty_cells() == CSS::EmptyCells::Hide && !has_children();
+    };
+
+    if (phase == PaintPhase::Background && !empty_cells_property_applies()) {
         paint_backdrop_filter(context);
         paint_background(context);
         paint_box_shadow(context);
@@ -479,16 +480,16 @@ void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
     }
 
     if (phase == PaintPhase::Overlay && (g_paint_viewport_scrollbars || !is_viewport()) && computed_values().scrollbar_width() != CSS::ScrollbarWidth::None) {
+        auto scrollbar_colors = computed_values().scrollbar_color();
         if (auto scrollbar_data = compute_scrollbar_data(ScrollDirection::Vertical); scrollbar_data.has_value()) {
             auto gutter_rect = context.rounded_device_rect(scrollbar_data->gutter_rect).to_type<int>();
             auto thumb_rect = context.rounded_device_rect(scrollbar_data->thumb_rect).to_type<int>();
-            context.display_list_recorder().paint_scrollbar(own_scroll_frame_id().value(), gutter_rect, thumb_rect, scrollbar_data->scroll_length, true);
+            context.display_list_recorder().paint_scrollbar(own_scroll_frame_id().value(), gutter_rect, thumb_rect, scrollbar_data->scroll_length, scrollbar_colors.thumb_color, scrollbar_colors.track_color, true);
         }
-
         if (auto scrollbar_data = compute_scrollbar_data(ScrollDirection::Horizontal); scrollbar_data.has_value()) {
             auto gutter_rect = context.rounded_device_rect(scrollbar_data->gutter_rect).to_type<int>();
             auto thumb_rect = context.rounded_device_rect(scrollbar_data->thumb_rect).to_type<int>();
-            context.display_list_recorder().paint_scrollbar(own_scroll_frame_id().value(), gutter_rect, thumb_rect, scrollbar_data->scroll_length, false);
+            context.display_list_recorder().paint_scrollbar(own_scroll_frame_id().value(), gutter_rect, thumb_rect, scrollbar_data->scroll_length, scrollbar_colors.thumb_color, scrollbar_colors.track_color, false);
         }
     }
 
@@ -572,14 +573,14 @@ void PaintableBox::paint_border(PaintContext& context) const
 void PaintableBox::paint_backdrop_filter(PaintContext& context) const
 {
     auto const& backdrop_filter = computed_values().backdrop_filter();
-    if (backdrop_filter.is_empty()) {
+    if (!backdrop_filter.has_value()) {
         return;
     }
 
     auto backdrop_region = context.rounded_device_rect(absolute_border_box_rect());
     auto border_radii_data = normalized_border_radii_data();
     ScopedCornerRadiusClip corner_clipper { context, backdrop_region, border_radii_data };
-    context.display_list_recorder().apply_backdrop_filter(backdrop_region.to_type<int>(), border_radii_data, backdrop_filter);
+    context.display_list_recorder().apply_backdrop_filter(backdrop_region.to_type<int>(), border_radii_data, backdrop_filter.value());
 }
 
 void PaintableBox::paint_background(PaintContext& context) const
@@ -669,7 +670,14 @@ void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintabl
         return;
 
     // NOTE: This checks if the cursor is before the start or after the end of the fragment. If it is at the end, after all text, it should still be painted.
-    if (cursor_position->offset() < (unsigned)fragment.start() || cursor_position->offset() > (unsigned)(fragment.start() + fragment.length()))
+    size_t cursor_position_byte_offset = 0;
+    if (cursor_position->offset() == fragment.utf16_view().length_in_code_units()) {
+        cursor_position_byte_offset = fragment.utf8_view().byte_length();
+    } else {
+        auto cursor_position_code_point_offset = fragment.utf16_view().code_point_offset_of(cursor_position->offset());
+        cursor_position_byte_offset = fragment.utf8_view().byte_offset_of(cursor_position_code_point_offset);
+    }
+    if (cursor_position_byte_offset < fragment.start_byte_offset() || cursor_position_byte_offset > (fragment.start_byte_offset() + fragment.length_in_bytes()))
         return;
 
     auto active_element = document.active_element();
@@ -686,10 +694,12 @@ void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintabl
 
     auto fragment_rect = fragment.absolute_rect();
 
-    auto text = fragment.string_view();
     auto const& font = fragment.glyph_run() ? fragment.glyph_run()->font() : fragment.layout_node().first_available_font();
+    auto utf8_text = fragment.utf8_view();
+    auto cursor_offset = font.width(utf8_text.substring_view(fragment.start_byte_offset(), cursor_position_byte_offset - fragment.start_byte_offset()));
+
     CSSPixelRect cursor_rect {
-        fragment_rect.x() + CSSPixels::nearest_value_for(font.width(text.substring_view(0, document.cursor_position()->offset() - fragment.start()))),
+        fragment_rect.x() + CSSPixels::nearest_value_for(cursor_offset),
         fragment_rect.top(),
         1,
         fragment_rect.height()
@@ -878,8 +888,8 @@ void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
 
     for (auto const& fragment : m_fragments) {
         auto fragment_absolute_rect = fragment.absolute_rect();
-        auto fragment_absolute_device_rect = context.enclosing_device_rect(fragment_absolute_rect);
         if (context.should_show_line_box_borders()) {
+            auto fragment_absolute_device_rect = context.enclosing_device_rect(fragment_absolute_rect);
             context.display_list_recorder().draw_rect(fragment_absolute_device_rect.to_type<int>(), Color::Green);
             context.display_list_recorder().draw_line(
                 context.rounded_device_point(fragment_absolute_rect.top_left().translated(0, fragment.baseline())).to_type<int>(),
@@ -902,24 +912,15 @@ Paintable::DispatchEventOfSameName PaintableBox::handle_mousedown(Badge<EventHan
     position = adjust_position_for_cumulative_scroll_offset(position);
 
     auto handle_scrollbar = [&](auto direction) {
-        auto scrollbar_data = compute_scrollbar_data(direction, AdjustThumbRectForScrollOffset::Yes);
+        auto scrollbar_data = compute_scrollbar_data(direction);
         if (!scrollbar_data.has_value())
             return false;
 
-        if (scrollbar_data->thumb_rect.contains(position)) {
-            m_last_mouse_tracking_position = position;
-            m_scroll_thumb_dragging_direction = direction;
-
-            navigable()->event_handler().set_mouse_event_tracking_paintable(this);
-            return true;
-        }
-
         if (scrollbar_data->gutter_rect.contains(position)) {
-            m_last_mouse_tracking_position = scrollbar_data->thumb_rect.center();
             m_scroll_thumb_dragging_direction = direction;
 
             navigable()->event_handler().set_mouse_event_tracking_paintable(this);
-            scroll_to_mouse_postion(position);
+            scroll_to_mouse_position(position);
             return true;
         }
 
@@ -936,10 +937,10 @@ Paintable::DispatchEventOfSameName PaintableBox::handle_mousedown(Badge<EventHan
 
 Paintable::DispatchEventOfSameName PaintableBox::handle_mouseup(Badge<EventHandler>, CSSPixelPoint, unsigned, unsigned)
 {
-    if (m_last_mouse_tracking_position.has_value()) {
-        m_last_mouse_tracking_position.clear();
+    if (m_scroll_thumb_grab_position.has_value()) {
+        m_scroll_thumb_grab_position.clear();
         m_scroll_thumb_dragging_direction.clear();
-        const_cast<HTML::Navigable&>(*navigable()).event_handler().set_mouse_event_tracking_paintable(nullptr);
+        navigable()->event_handler().set_mouse_event_tracking_paintable(nullptr);
     }
     return Paintable::DispatchEventOfSameName::Yes;
 }
@@ -948,8 +949,8 @@ Paintable::DispatchEventOfSameName PaintableBox::handle_mousemove(Badge<EventHan
 {
     position = adjust_position_for_cumulative_scroll_offset(position);
 
-    if (m_last_mouse_tracking_position.has_value()) {
-        scroll_to_mouse_postion(position);
+    if (m_scroll_thumb_grab_position.has_value()) {
+        scroll_to_mouse_position(position);
         return Paintable::DispatchEventOfSameName::No;
     }
 
@@ -981,30 +982,44 @@ bool PaintableBox::scrollbar_contains_mouse_position(ScrollDirection direction, 
     return scrollbar_data->gutter_rect.contains(position);
 }
 
-void PaintableBox::scroll_to_mouse_postion(CSSPixelPoint position)
+void PaintableBox::scroll_to_mouse_position(CSSPixelPoint position)
 {
-    VERIFY(m_last_mouse_tracking_position.has_value());
     VERIFY(m_scroll_thumb_dragging_direction.has_value());
 
-    Gfx::Point<double> scroll_delta;
-    if (m_scroll_thumb_dragging_direction == ScrollDirection::Horizontal)
-        scroll_delta.set_x((position.x() - m_last_mouse_tracking_position->x()).to_double());
-    else
-        scroll_delta.set_y((position.y() - m_last_mouse_tracking_position->y()).to_double());
+    auto scrollbar_data = compute_scrollbar_data(m_scroll_thumb_dragging_direction.value(), AdjustThumbRectForScrollOffset::Yes);
+    VERIFY(scrollbar_data.has_value());
 
-    auto padding_rect = absolute_padding_box_rect();
-    auto scrollable_overflow_rect = this->scrollable_overflow_rect().value();
-    auto scroll_overflow_size = m_scroll_thumb_dragging_direction == ScrollDirection::Horizontal ? scrollable_overflow_rect.width() : scrollable_overflow_rect.height();
-    auto scrollport_size = m_scroll_thumb_dragging_direction == ScrollDirection::Horizontal ? padding_rect.width() : padding_rect.height();
-    auto scroll_px_per_mouse_position_delta_px = scroll_overflow_size.to_double() / scrollport_size.to_double();
-    scroll_delta *= scroll_px_per_mouse_position_delta_px;
+    auto orientation = m_scroll_thumb_dragging_direction == ScrollDirection::Horizontal ? Orientation::Horizontal : Orientation::Vertical;
+    auto offset_relative_to_gutter = (position - scrollbar_data->gutter_rect.location()).primary_offset_for_orientation(orientation);
+    auto gutter_size = scrollbar_data->gutter_rect.primary_size_for_orientation(orientation);
+    auto thumb_size = scrollbar_data->thumb_rect.primary_size_for_orientation(orientation);
+
+    // Set the thumb grab position, if we haven't got one already.
+    if (!m_scroll_thumb_grab_position.has_value()) {
+        m_scroll_thumb_grab_position = scrollbar_data->thumb_rect.contains(position)
+            ? (position - scrollbar_data->thumb_rect.location()).primary_offset_for_orientation(orientation)
+            : max(min(offset_relative_to_gutter, thumb_size / 2), offset_relative_to_gutter - gutter_size + thumb_size);
+    }
+
+    // Calculate the relative scroll position (0..1) based on the position of the mouse cursor. We only move the thumb
+    // if we are interacting with the grab point on the thumb. E.g. if the thumb is all the way to its minimum position
+    // and the position is beyond the grab point, we should do nothing.
+    auto constrained_offset = AK::clamp(offset_relative_to_gutter - m_scroll_thumb_grab_position.value(), 0, gutter_size - thumb_size);
+    auto scroll_position = constrained_offset.to_double() / (gutter_size - thumb_size).to_double();
+
+    // Calculate the scroll offset we need to apply to the viewport or element.
+    auto scrollable_overflow_size = scrollable_overflow_rect()->primary_size_for_orientation(orientation);
+    auto padding_size = absolute_padding_box_rect().primary_size_for_orientation(orientation);
+    auto scroll_position_in_pixels = CSSPixels::nearest_value_for(scroll_position * (scrollable_overflow_size - padding_size));
+
+    // Set the new scroll offset.
+    auto new_scroll_offset = is_viewport() ? document().navigable()->viewport_scroll_offset() : scroll_offset();
+    new_scroll_offset.set_primary_offset_for_orientation(orientation, scroll_position_in_pixels);
 
     if (is_viewport())
-        document().window()->scroll_by(scroll_delta.x(), scroll_delta.y());
+        document().navigable()->perform_scroll_of_viewport(new_scroll_offset);
     else
-        scroll_by(scroll_delta.x(), scroll_delta.y());
-
-    m_last_mouse_tracking_position = position;
+        set_scroll_offset(new_scroll_offset);
 }
 
 bool PaintableBox::handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned, unsigned, int wheel_delta_x, int wheel_delta_y)
@@ -1181,7 +1196,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
         if (fragment_absolute_rect.contains(transformed_position_adjusted_by_scroll_offset)) {
             if (fragment.paintable().hit_test(transformed_position_adjusted_by_scroll_offset, type, callback) == TraversalDecision::Break)
                 return TraversalDecision::Break;
-            HitTestResult hit_test_result { const_cast<Paintable&>(fragment.paintable()), fragment.text_index_at(transformed_position_adjusted_by_scroll_offset), 0, 0 };
+            HitTestResult hit_test_result { const_cast<Paintable&>(fragment.paintable()), fragment.index_in_node_for_point(transformed_position_adjusted_by_scroll_offset), 0, 0 };
             if (callback(hit_test_result) == TraversalDecision::Break)
                 return TraversalDecision::Break;
         } else if (type == HitTestType::TextCursor) {
@@ -1207,7 +1222,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                 if (fragment_absolute_rect.bottom() - 1 <= transformed_position_adjusted_by_scroll_offset.y()) { // fully below the fragment
                     HitTestResult hit_test_result {
                         .paintable = const_cast<Paintable&>(fragment.paintable()),
-                        .index_in_node = fragment.start() + fragment.length(),
+                        .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset() + fragment.length_in_bytes()),
                         .vertical_distance = transformed_position_adjusted_by_scroll_offset.y() - fragment_absolute_rect.bottom(),
                     };
                     if (callback(hit_test_result) == TraversalDecision::Break)
@@ -1216,7 +1231,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                     if (transformed_position_adjusted_by_scroll_offset.x() < fragment_absolute_rect.left()) {
                         HitTestResult hit_test_result {
                             .paintable = const_cast<Paintable&>(fragment.paintable()),
-                            .index_in_node = fragment.start(),
+                            .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset()),
                             .vertical_distance = 0,
                             .horizontal_distance = fragment_absolute_rect.left() - transformed_position_adjusted_by_scroll_offset.x(),
                         };
@@ -1225,7 +1240,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
                     } else if (transformed_position_adjusted_by_scroll_offset.x() > fragment_absolute_rect.right()) {
                         HitTestResult hit_test_result {
                             .paintable = const_cast<Paintable&>(fragment.paintable()),
-                            .index_in_node = fragment.start() + fragment.length(),
+                            .index_in_node = fragment.index_in_node_for_byte_offset(fragment.start_byte_offset() + fragment.length_in_bytes()),
                             .vertical_distance = 0,
                             .horizontal_distance = transformed_position_adjusted_by_scroll_offset.x() - fragment_absolute_rect.right(),
                         };

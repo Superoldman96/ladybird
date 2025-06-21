@@ -50,20 +50,23 @@ static RefPtr<Gfx::SkiaBackendContext> get_skia_backend_context()
 
 TraversableNavigable::TraversableNavigable(GC::Ref<Page> page)
     : Navigable(page)
+    , m_storage_shed(StorageAPI::StorageShed::create(page->heap()))
     , m_session_history_traversal_queue(vm().heap().allocate<SessionHistoryTraversalQueue>())
 {
-    auto display_list_player_type = page->client().display_list_player_type();
-    OwnPtr<Painting::DisplayListPlayerSkia> skia_player;
-    if (display_list_player_type == DisplayListPlayerType::SkiaGPUIfAvailable) {
-        m_skia_backend_context = get_skia_backend_context();
-        skia_player = make<Painting::DisplayListPlayerSkia>(m_skia_backend_context);
-    } else {
-        skia_player = make<Painting::DisplayListPlayerSkia>();
-    }
+    if (!page->client().is_svg_page_client()) {
+        auto display_list_player_type = page->client().display_list_player_type();
+        OwnPtr<Painting::DisplayListPlayerSkia> skia_player;
+        if (display_list_player_type == DisplayListPlayerType::SkiaGPUIfAvailable) {
+            m_skia_backend_context = get_skia_backend_context();
+            skia_player = make<Painting::DisplayListPlayerSkia>(m_skia_backend_context);
+        } else {
+            skia_player = make<Painting::DisplayListPlayerSkia>();
+        }
 
-    m_rendering_thread.set_skia_player(move(skia_player));
-    m_rendering_thread.set_skia_backend_context(m_skia_backend_context);
-    m_rendering_thread.start(display_list_player_type);
+        m_rendering_thread.set_skia_player(move(skia_player));
+        m_rendering_thread.set_skia_backend_context(m_skia_backend_context);
+        m_rendering_thread.start(display_list_player_type);
+    }
 }
 
 TraversableNavigable::~TraversableNavigable() = default;
@@ -73,6 +76,7 @@ void TraversableNavigable::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_session_history_entries);
     visitor.visit(m_session_history_traversal_queue);
+    visitor.visit(m_storage_shed);
 }
 
 static OrderedHashTable<TraversableNavigable*>& user_agent_top_level_traversable_set()

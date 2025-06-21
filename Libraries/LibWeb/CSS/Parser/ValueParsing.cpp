@@ -8,6 +8,7 @@
  * Copyright (c) 2024, Tommy van der Vorst <tommy@pixelspark.nl>
  * Copyright (c) 2024, Matthew Olsson <mattco@serenityos.org>
  * Copyright (c) 2024, Glenn Skrzypczak <glenn.skrzypczak@gmail.com>
+ * Copyright (c) 2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -1788,7 +1789,8 @@ RefPtr<CSSStyleValue const> Parser::parse_color_mix_function(TokenStream<Compone
         };
     };
 
-    // color-mix() = color-mix( <color-interpolation-method> , [ <color> && <percentage [0,100]>? ]#{2})
+    // color-mix() = color-mix( <color-interpolation-method> , [ <color> && <percentage [0,100]>? ]#)
+    // FIXME: Update color-mix to accept 1+ colors instead of exactly 2.
     auto transaction = tokens.begin_transaction();
     tokens.discard_whitespace();
 
@@ -2620,19 +2622,30 @@ RefPtr<CSSStyleValue const> Parser::parse_easing_value(TokenStream<ComponentValu
         for (auto const& argument : comma_separated_arguments) {
             if (argument.size() != 1)
                 return nullptr;
-            if (!argument[0].is(Token::Type::Number))
-                return nullptr;
         }
 
-        EasingStyleValue::CubicBezier bezier {
-            comma_separated_arguments[0][0].token().number_value(),
-            comma_separated_arguments[1][0].token().number_value(),
-            comma_separated_arguments[2][0].token().number_value(),
-            comma_separated_arguments[3][0].token().number_value(),
+        auto parse_argument = [this, &comma_separated_arguments](auto index) {
+            TokenStream<ComponentValue> argument_tokens { comma_separated_arguments[index] };
+            return parse_number(argument_tokens);
         };
 
-        if (bezier.x1 < 0.0 || bezier.x1 > 1.0 || bezier.x2 < 0.0 || bezier.x2 > 1.0)
+        auto x1 = parse_argument(0);
+        auto y1 = parse_argument(1);
+        auto x2 = parse_argument(2);
+        auto y2 = parse_argument(3);
+        if (!x1.has_value() || !y1.has_value() || !x2.has_value() || !y2.has_value())
             return nullptr;
+        if (!x1->is_calculated() && (x1->value() < 0.0 || x1->value() > 1.0))
+            return nullptr;
+        if (!x2->is_calculated() && (x2->value() < 0.0 || x2->value() > 1.0))
+            return nullptr;
+
+        EasingStyleValue::CubicBezier bezier {
+            x1.release_value(),
+            y1.release_value(),
+            x2.release_value(),
+            y2.release_value(),
+        };
 
         transaction.commit();
         return EasingStyleValue::create(bezier);
@@ -2650,11 +2663,10 @@ RefPtr<CSSStyleValue const> Parser::parse_easing_value(TokenStream<ComponentValu
         EasingStyleValue::Steps steps;
 
         auto const& intervals_argument = comma_separated_arguments[0][0];
-        if (!intervals_argument.is(Token::Type::Number))
+        auto intervals_token = TokenStream<ComponentValue>::of_single_token(intervals_argument);
+        auto intervals = parse_integer(intervals_token);
+        if (!intervals.has_value())
             return nullptr;
-        if (!intervals_argument.token().number().is_integer())
-            return nullptr;
-        auto intervals = intervals_argument.token().to_integer();
 
         if (comma_separated_arguments.size() == 2) {
             TokenStream identifier_stream { comma_separated_arguments[1] };
@@ -2689,14 +2701,16 @@ RefPtr<CSSStyleValue const> Parser::parse_easing_value(TokenStream<ComponentValu
         // https://drafts.csswg.org/css-easing/#step-easing-functions
         // If the <step-position> is jump-none, the <integer> must be at least 2, or the function is invalid.
         // Otherwise, the <integer> must be at least 1, or the function is invalid.
-        if (steps.position == EasingStyleValue::Steps::Position::JumpNone) {
-            if (intervals <= 1)
+        if (!intervals->is_calculated()) {
+            if (steps.position == EasingStyleValue::Steps::Position::JumpNone) {
+                if (intervals->value() <= 1)
+                    return nullptr;
+            } else if (intervals->value() <= 0) {
                 return nullptr;
-        } else if (intervals <= 0) {
-            return nullptr;
+            }
         }
 
-        steps.number_of_intervals = intervals;
+        steps.number_of_intervals = *intervals;
         transaction.commit();
         return EasingStyleValue::create(steps);
     }
@@ -2710,7 +2724,6 @@ Optional<URL> Parser::parse_url_function(TokenStream<ComponentValue>& tokens)
     // <url> = <url()> | <src()>
     // <url()> = url( <string> <url-modifier>* ) | <url-token>
     // <src()> = src( <string> <url-modifier>* )
-    // FIXME: Also parse src() function
     auto transaction = tokens.begin_transaction();
     auto const& component_value = tokens.consume_a_token();
 
@@ -2721,7 +2734,17 @@ Optional<URL> Parser::parse_url_function(TokenStream<ComponentValue>& tokens)
     }
 
     // <url()> = url( <string> <url-modifier>* )
-    if (component_value.is_function("url"sv)) {
+    // <src()> = src( <string> <url-modifier>* )
+    if (component_value.is_function()) {
+        URL::Type function_type;
+        if (component_value.is_function("url"sv)) {
+            function_type = URL::Type::Url;
+        } else if (component_value.is_function("src"sv)) {
+            function_type = URL::Type::Src;
+        } else {
+            return {};
+        }
+
         auto const& function_values = component_value.function().value;
         TokenStream url_tokens { function_values };
 
@@ -2802,7 +2825,7 @@ Optional<URL> Parser::parse_url_function(TokenStream<ComponentValue>& tokens)
         });
 
         transaction.commit();
-        return URL { url_string.token().string().to_string(), move(request_url_modifiers) };
+        return URL { url_string.token().string().to_string(), function_type, move(request_url_modifiers) };
     }
 
     return {};
@@ -3188,243 +3211,437 @@ RefPtr<CustomIdentStyleValue const> Parser::parse_custom_ident_value(TokenStream
     return nullptr;
 }
 
-Optional<CSS::GridSize> Parser::parse_grid_size(ComponentValue const& component_value)
+// https://www.w3.org/TR/css-grid-2/#typedef-track-breadth
+Optional<GridSize> Parser::parse_grid_track_breadth(TokenStream<ComponentValue>& tokens)
 {
-    if (component_value.is_function()) {
-        if (auto maybe_calculated = parse_calculated_value(component_value)) {
-            if (maybe_calculated->is_length())
-                return GridSize(maybe_calculated->as_length().length());
-            if (maybe_calculated->is_percentage())
-                return GridSize(maybe_calculated->as_percentage().percentage());
-            if (maybe_calculated->is_calculated() && maybe_calculated->as_calculated().resolves_to_length_percentage())
-                return GridSize(LengthPercentage(maybe_calculated->as_calculated()));
-            // FIXME: Support calculated <flex>
-        }
+    // <track-breadth> = <length-percentage [0,∞]> | <flex [0,∞]> | min-content | max-content | auto
 
-        return {};
+    if (auto inflexible_breadth = parse_grid_inflexible_breadth(tokens); inflexible_breadth.has_value())
+        return inflexible_breadth;
+
+    // FIXME: Handle calculated flex values.
+    if (auto flex_value = parse_flex_value(tokens); flex_value && flex_value->is_flex()) {
+        if (auto flex = flex_value->as_flex().flex(); flex.raw_value() >= 0)
+            return GridSize(flex);
     }
-    if (component_value.is_ident("auto"sv))
-        return GridSize::make_auto();
-    if (component_value.is_ident("max-content"sv))
+
+    return {};
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-inflexible-breadth
+Optional<GridSize> Parser::parse_grid_inflexible_breadth(TokenStream<ComponentValue>& tokens)
+{
+    // <inflexible-breadth>  = <length-percentage [0,∞]> | min-content | max-content | auto
+
+    if (auto fixed_breadth = parse_grid_fixed_breadth(tokens); fixed_breadth.has_value())
+        return fixed_breadth;
+
+    auto transaction = tokens.begin_transaction();
+    if (!tokens.has_next_token())
+        return {};
+
+    auto const& token = tokens.consume_a_token();
+    if (token.is_ident("max-content"sv)) {
+        transaction.commit();
         return GridSize(GridSize::Type::MaxContent);
-    if (component_value.is_ident("min-content"sv))
-        return GridSize(GridSize::Type::MinContent);
-    auto dimension = parse_dimension(component_value);
-    if (!dimension.has_value())
-        return {};
-    if (dimension->is_length())
-        return GridSize(dimension->length());
-    else if (dimension->is_percentage())
-        return GridSize(dimension->percentage());
-    else if (dimension->is_flex())
-        return GridSize(dimension->flex());
-    return {};
-}
-
-Optional<CSS::GridFitContent> Parser::parse_grid_fit_content(Vector<ComponentValue> const& component_values)
-{
-    // https://www.w3.org/TR/css-grid-2/#valdef-grid-template-columns-fit-content
-    // 'fit-content( <length-percentage> )'
-    // Represents the formula max(minimum, min(limit, max-content)), where minimum represents an auto minimum (which is often, but not always,
-    // equal to a min-content minimum), and limit is the track sizing function passed as an argument to fit-content().
-    // This is essentially calculated as the smaller of minmax(auto, max-content) and minmax(auto, limit).
-    auto function_tokens = TokenStream(component_values);
-    function_tokens.discard_whitespace();
-    auto maybe_length_percentage = parse_length_percentage(function_tokens);
-    if (maybe_length_percentage.has_value())
-        return CSS::GridFitContent(CSS::GridSize(CSS::GridSize::Type::FitContent, maybe_length_percentage.value()));
-    return {};
-}
-
-Optional<CSS::GridMinMax> Parser::parse_min_max(Vector<ComponentValue> const& component_values)
-{
-    // https://www.w3.org/TR/css-grid-2/#valdef-grid-template-columns-minmax
-    // 'minmax(min, max)'
-    // Defines a size range greater than or equal to min and less than or equal to max. If the max is
-    // less than the min, then the max will be floored by the min (essentially yielding minmax(min,
-    // min)). As a maximum, a <flex> value sets the track’s flex factor; it is invalid as a minimum.
-    auto function_tokens = TokenStream(component_values);
-    auto comma_separated_list = parse_a_comma_separated_list_of_component_values(function_tokens);
-    if (comma_separated_list.size() != 2)
-        return {};
-
-    TokenStream part_one_tokens { comma_separated_list[0] };
-    part_one_tokens.discard_whitespace();
-    if (!part_one_tokens.has_next_token())
-        return {};
-    NonnullRawPtr<ComponentValue const> current_token = part_one_tokens.consume_a_token();
-    auto min_grid_size = parse_grid_size(current_token);
-
-    TokenStream part_two_tokens { comma_separated_list[1] };
-    part_two_tokens.discard_whitespace();
-    if (!part_two_tokens.has_next_token())
-        return {};
-    current_token = part_two_tokens.consume_a_token();
-    auto max_grid_size = parse_grid_size(current_token);
-
-    if (min_grid_size.has_value() && max_grid_size.has_value()) {
-        // https://www.w3.org/TR/css-grid-2/#valdef-grid-template-columns-minmax
-        // As a maximum, a <flex> value sets the track’s flex factor; it is invalid as a minimum.
-        if (min_grid_size.value().is_flexible_length())
-            return {};
-        return CSS::GridMinMax(min_grid_size.value(), max_grid_size.value());
     }
+    if (token.is_ident("min-content"sv)) {
+        transaction.commit();
+        return GridSize(GridSize::Type::MinContent);
+    }
+    if (token.is_ident("auto"sv)) {
+        transaction.commit();
+        return GridSize::make_auto();
+    }
+
     return {};
 }
 
-Optional<CSS::GridRepeat> Parser::parse_repeat(Vector<ComponentValue> const& component_values)
+// https://www.w3.org/TR/css-grid-2/#typedef-fixed-breadth
+Optional<GridSize> Parser::parse_grid_fixed_breadth(TokenStream<ComponentValue>& tokens)
 {
-    // https://www.w3.org/TR/css-grid-2/#repeat-syntax
-    // 7.2.3.1. Syntax of repeat()
-    // The generic form of the repeat() syntax is, approximately,
-    // repeat( [ <integer [1,∞]> | auto-fill | auto-fit ] , <track-list> )
-    auto is_auto_fill = false;
-    auto is_auto_fit = false;
-    auto function_tokens = TokenStream(component_values);
-    auto comma_separated_list = parse_a_comma_separated_list_of_component_values(function_tokens);
-    if (comma_separated_list.size() != 2)
-        return {};
-    // The first argument specifies the number of repetitions.
-    TokenStream part_one_tokens { comma_separated_list[0] };
-    part_one_tokens.discard_whitespace();
-    if (!part_one_tokens.has_next_token())
-        return {};
-    auto& current_token = part_one_tokens.consume_a_token();
+    // <fixed-breadth> = <length-percentage [0,∞]>
 
-    auto repeat_count = 0;
-    if (current_token.is(Token::Type::Number) && current_token.token().number().is_integer() && current_token.token().number_value() > 0)
-        repeat_count = current_token.token().number_value();
-    else if (current_token.is_ident("auto-fill"sv))
-        is_auto_fill = true;
-    else if (current_token.is_ident("auto-fit"sv))
-        is_auto_fit = true;
-
-    // The second argument is a track list, which is repeated that number of times.
-    TokenStream part_two_tokens { comma_separated_list[1] };
-    part_two_tokens.discard_whitespace();
-    if (!part_two_tokens.has_next_token())
+    auto transaction = tokens.begin_transaction();
+    auto length_percentage = parse_length_percentage(tokens);
+    if (!length_percentage.has_value())
         return {};
+    if (length_percentage->is_length() && length_percentage->length().raw_value() < 0)
+        return {};
+    if (length_percentage->is_percentage() && length_percentage->percentage().value() < 0)
+        return {};
+    transaction.commit();
+    return GridSize(length_percentage.release_value());
+}
 
-    Vector<Variant<ExplicitGridTrack, GridLineNames>> repeat_params;
-    auto last_object_was_line_names = false;
-    while (part_two_tokens.has_next_token()) {
-        auto const& token = part_two_tokens.consume_a_token();
-        Vector<String> line_names;
-        if (token.is_block()) {
-            if (last_object_was_line_names)
-                return {};
-            last_object_was_line_names = true;
-            if (!token.block().is_square())
-                return {};
-            TokenStream block_tokens { token.block().value };
-            while (block_tokens.has_next_token()) {
-                auto const& current_block_token = block_tokens.consume_a_token();
-                line_names.append(current_block_token.token().ident().to_string());
-                block_tokens.discard_whitespace();
+// https://www.w3.org/TR/css-grid-2/#typedef-line-names
+Optional<GridLineNames> Parser::parse_grid_line_names(TokenStream<ComponentValue>& tokens)
+{
+    // <line-names> = '[' <custom-ident>* ']'
+
+    auto transactions = tokens.begin_transaction();
+    GridLineNames line_names;
+    auto const& token = tokens.consume_a_token();
+    if (!token.is_block() || !token.block().is_square())
+        return line_names;
+
+    TokenStream block_tokens { token.block().value };
+    block_tokens.discard_whitespace();
+    while (block_tokens.has_next_token()) {
+        auto maybe_ident = parse_custom_ident(block_tokens, { { "span"sv, "auto"sv } });
+        if (!maybe_ident.has_value())
+            return OptionalNone {};
+        line_names.names.append(maybe_ident.release_value());
+        block_tokens.discard_whitespace();
+    }
+
+    transactions.commit();
+    return line_names;
+}
+
+size_t Parser::parse_track_list_impl(TokenStream<ComponentValue>& tokens, GridTrackSizeList& output, GridTrackParser const& track_parsing_callback, AllowTrailingLineNamesForEachTrack allow_trailing_line_names_for_each_track)
+{
+    size_t parsed_tracks_count = 0;
+    while (tokens.has_next_token()) {
+        auto transaction = tokens.begin_transaction();
+        auto line_names = parse_grid_line_names(tokens);
+
+        tokens.discard_whitespace();
+        auto explicit_grid_track = track_parsing_callback(tokens);
+        tokens.discard_whitespace();
+
+        if (!explicit_grid_track.has_value())
+            break;
+
+        if (line_names.has_value() && !line_names->names.is_empty())
+            output.append(line_names.release_value());
+
+        output.append(explicit_grid_track.release_value());
+        if (allow_trailing_line_names_for_each_track == AllowTrailingLineNamesForEachTrack::Yes) {
+            auto trailing_line_names = parse_grid_line_names(tokens);
+            if (trailing_line_names.has_value() && !trailing_line_names->names.is_empty()) {
+                output.append(trailing_line_names.release_value());
             }
-            repeat_params.append(GridLineNames { move(line_names) });
-            part_two_tokens.discard_whitespace();
-        } else {
-            last_object_was_line_names = false;
-            auto track_sizing_function = parse_track_sizing_function(token);
-            if (!track_sizing_function.has_value())
-                return {};
-            // However, there are some restrictions:
-            // The repeat() notation can’t be nested.
-            if (track_sizing_function.value().is_repeat())
-                return {};
+        }
+        transaction.commit();
+        parsed_tracks_count++;
+    }
 
-            // Automatic repetitions (auto-fill or auto-fit) cannot be combined with intrinsic or flexible sizes.
-            // Note that 'auto' is also an intrinsic size (and thus not permitted) but we can't use
-            // track_sizing_function.is_auto(..) to check for it, as it requires AvailableSize, which is why there is
-            // a separate check for it below.
-            // https://www.w3.org/TR/css-grid-2/#repeat-syntax
-            // https://www.w3.org/TR/css-grid-2/#intrinsic-sizing-function
-            if (track_sizing_function.value().is_default()
-                && (track_sizing_function.value().grid_size().is_flexible_length() || token.is_ident("auto"sv))
-                && (is_auto_fill || is_auto_fit))
-                return {};
-            if ((is_auto_fill || is_auto_fit) && track_sizing_function->is_minmax()) {
-                auto const& minmax = track_sizing_function->minmax();
-                if (!minmax.min_grid_size().is_definite() && !minmax.max_grid_size().is_definite()) {
-                    return {};
-                }
-            }
-
-            repeat_params.append(track_sizing_function.value());
-            part_two_tokens.discard_whitespace();
+    if (allow_trailing_line_names_for_each_track == AllowTrailingLineNamesForEachTrack::No) {
+        if (auto trailing_line_names = parse_grid_line_names(tokens); trailing_line_names.has_value() && !trailing_line_names->names.is_empty()) {
+            output.append(trailing_line_names.release_value());
         }
     }
 
-    // Thus the precise syntax of the repeat() notation has several forms:
-    // <track-repeat> = repeat( [ <integer [1,∞]> ] , [ <line-names>? <track-size> ]+ <line-names>? )
-    // <auto-repeat>  = repeat( [ auto-fill | auto-fit ] , [ <line-names>? <fixed-size> ]+ <line-names>? )
-    // <fixed-repeat> = repeat( [ <integer [1,∞]> ] , [ <line-names>? <fixed-size> ]+ <line-names>? )
-    // <name-repeat>  = repeat( [ <integer [1,∞]> | auto-fill ], <line-names>+)
-
-    // The <track-repeat> variant can represent the repetition of any <track-size>, but is limited to a
-    // fixed number of repetitions.
-
-    // The <auto-repeat> variant can repeat automatically to fill a space, but requires definite track
-    // sizes so that the number of repetitions can be calculated. It can only appear once in the track
-    // list, but the same track list can also contain <fixed-repeat>s.
-
-    // The <name-repeat> variant is for adding line names to subgrids. It can only be used with the
-    // subgrid keyword and cannot specify track sizes, only line names.
-
-    // If a repeat() function that is not a <name-repeat> ends up placing two <line-names> adjacent to
-    // each other, the name lists are merged. For example, repeat(2, [a] 1fr [b]) is equivalent to [a]
-    // 1fr [b a] 1fr [b].
-    if (is_auto_fill)
-        return GridRepeat(GridTrackSizeList(move(repeat_params)), GridRepeat::Type::AutoFill);
-    else if (is_auto_fit)
-        return GridRepeat(GridTrackSizeList(move(repeat_params)), GridRepeat::Type::AutoFit);
-    else
-        return GridRepeat(GridTrackSizeList(move(repeat_params)), repeat_count);
+    return parsed_tracks_count;
 }
 
-Optional<CSS::ExplicitGridTrack> Parser::parse_track_sizing_function(ComponentValue const& token)
+Optional<GridRepeat> Parser::parse_grid_track_repeat_impl(TokenStream<ComponentValue>& tokens, GridRepeatTypeParser const& repeat_type_parser, GridTrackParser const& repeat_track_parser)
 {
-    if (token.is_function()) {
+    auto transaction = tokens.begin_transaction();
+
+    if (!tokens.has_next_token())
+        return {};
+
+    auto const& token = tokens.consume_a_token();
+    if (!token.is_function())
+        return {};
+
+    auto const& function_token = token.function();
+    if (!function_token.name.equals_ignoring_ascii_case("repeat"sv))
+        return {};
+    auto context_guard = push_temporary_value_parsing_context(FunctionContext { function_token.name });
+
+    auto function_tokens = TokenStream(function_token.value);
+    auto comma_separated_list = parse_a_comma_separated_list_of_component_values(function_tokens);
+    if (comma_separated_list.size() != 2)
+        return {};
+
+    TokenStream first_arg_tokens { comma_separated_list[0] };
+    first_arg_tokens.discard_whitespace();
+    if (!first_arg_tokens.has_next_token())
+        return {};
+
+    auto repeat_params = repeat_type_parser(first_arg_tokens);
+    if (!repeat_params.has_value())
+        return {};
+    first_arg_tokens.discard_whitespace();
+    if (first_arg_tokens.has_next_token())
+        return {};
+
+    TokenStream second_arg_tokens { comma_separated_list[1] };
+    second_arg_tokens.discard_whitespace();
+    GridTrackSizeList track_list;
+    if (auto parsed_track_count = parse_track_list_impl(second_arg_tokens, track_list, repeat_track_parser); parsed_track_count == 0)
+        return {};
+    if (second_arg_tokens.has_next_token())
+        return {};
+    transaction.commit();
+    return GridRepeat(GridTrackSizeList(move(track_list)), repeat_params.release_value());
+}
+
+Optional<ExplicitGridTrack> Parser::parse_grid_minmax(TokenStream<ComponentValue>& tokens, GridMinMaxParamParser const& min_parser, GridMinMaxParamParser const& max_parser)
+{
+    auto transaction = tokens.begin_transaction();
+
+    if (!tokens.has_next_token())
+        return {};
+
+    auto const& token = tokens.consume_a_token();
+    if (!token.is_function())
+        return {};
+
+    auto const& function_token = token.function();
+    if (!function_token.name.equals_ignoring_ascii_case("minmax"sv))
+        return {};
+
+    auto context_guard = push_temporary_value_parsing_context(FunctionContext { function_token.name });
+    auto function_tokens = TokenStream(function_token.value);
+    auto comma_separated_list = parse_a_comma_separated_list_of_component_values(function_tokens);
+    if (comma_separated_list.size() != 2)
+        return {};
+
+    TokenStream min_tokens { comma_separated_list[0] };
+    min_tokens.discard_whitespace();
+    auto min_value = min_parser(min_tokens);
+    if (!min_value.has_value())
+        return {};
+    min_tokens.discard_whitespace();
+    if (min_tokens.has_next_token())
+        return {};
+
+    TokenStream max_tokens { comma_separated_list[1] };
+    max_tokens.discard_whitespace();
+    auto max_value = max_parser(max_tokens);
+    if (!max_value.has_value())
+        return {};
+    max_tokens.discard_whitespace();
+    if (max_tokens.has_next_token())
+        return {};
+
+    transaction.commit();
+    return ExplicitGridTrack(GridMinMax(min_value.release_value(), max_value.release_value()));
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-track-repeat
+Optional<GridRepeat> Parser::parse_grid_track_repeat(TokenStream<ComponentValue>& tokens)
+{
+    // <track-repeat> = repeat( [ <integer [1,∞]> ] , [ <line-names>? <track-size> ]+ <line-names>? )
+
+    GridRepeatTypeParser parse_repeat_type = [this](TokenStream<ComponentValue>& tokens) -> Optional<GridRepeatParams> {
+        auto maybe_integer = parse_integer(tokens);
+        if (!maybe_integer.has_value())
+            return {};
+        if (maybe_integer->is_calculated()) {
+            // FIXME: Support calculated repeat counts.
+            return {};
+        }
+        if (maybe_integer->value() < 1)
+            return {};
+        return GridRepeatParams { GridRepeatType::Fixed, static_cast<size_t>(maybe_integer->value()) };
+    };
+    GridTrackParser parse_track = [this](TokenStream<ComponentValue>& tokens) {
+        return parse_grid_track_size(tokens);
+    };
+    return parse_grid_track_repeat_impl(tokens, parse_repeat_type, parse_track);
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-auto-repeat
+Optional<GridRepeat> Parser::parse_grid_auto_repeat(TokenStream<ComponentValue>& tokens)
+{
+    // <auto-repeat> = repeat( [ auto-fill | auto-fit ] , [ <line-names>? <fixed-size> ]+ <line-names>? )
+
+    GridRepeatTypeParser parse_repeat_type = [](TokenStream<ComponentValue>& tokens) -> Optional<GridRepeatParams> {
+        auto const& first_token = tokens.consume_a_token();
+        if (!first_token.is_token() || !first_token.token().is(Token::Type::Ident))
+            return {};
+
+        auto ident_value = first_token.token().ident();
+        if (ident_value.equals_ignoring_ascii_case("auto-fill"sv))
+            return GridRepeatParams { GridRepeatType::AutoFill };
+        if (ident_value.equals_ignoring_ascii_case("auto-fit"sv))
+            return GridRepeatParams { GridRepeatType::AutoFit };
+        return {};
+    };
+    GridTrackParser parse_track = [this](TokenStream<ComponentValue>& tokens) {
+        return parse_grid_fixed_size(tokens);
+    };
+    return parse_grid_track_repeat_impl(tokens, parse_repeat_type, parse_track);
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-fixed-repeat
+Optional<GridRepeat> Parser::parse_grid_fixed_repeat(TokenStream<ComponentValue>& tokens)
+{
+    // <fixed-repeat> = repeat( [ <integer [1,∞]> ] , [ <line-names>? <fixed-size> ]+ <line-names>? )
+
+    GridRepeatTypeParser parse_repeat_type = [this](TokenStream<ComponentValue>& tokens) -> Optional<GridRepeatParams> {
+        auto maybe_integer = parse_integer(tokens);
+        if (!maybe_integer.has_value())
+            return {};
+        if (maybe_integer->is_calculated()) {
+            // FIXME: Support calculated repeat counts.
+            return {};
+        }
+        if (maybe_integer->value() < 1)
+            return {};
+        return GridRepeatParams { GridRepeatType::Fixed, static_cast<size_t>(maybe_integer->value()) };
+    };
+    GridTrackParser parse_track = [this](TokenStream<ComponentValue>& tokens) {
+        return parse_grid_fixed_size(tokens);
+    };
+    return parse_grid_track_repeat_impl(tokens, parse_repeat_type, parse_track);
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-track-size
+Optional<ExplicitGridTrack> Parser::parse_grid_track_size(TokenStream<ComponentValue>& tokens)
+{
+    // <track-size> = <track-breadth> | minmax( <inflexible-breadth> , <track-breadth> ) | fit-content( <length-percentage [0,∞]> )
+
+    if (!tokens.has_next_token())
+        return {};
+
+    if (tokens.peek_token().is_function()) {
+        auto const& token = tokens.peek_token();
         auto const& function_token = token.function();
+
+        if (function_token.name.equals_ignoring_ascii_case("minmax"sv)) {
+            GridMinMaxParamParser parse_min = [this](auto& tokens) { return parse_grid_inflexible_breadth(tokens); };
+            GridMinMaxParamParser parse_max = [this](auto& tokens) { return parse_grid_track_breadth(tokens); };
+            return parse_grid_minmax(tokens, parse_min, parse_max);
+        }
+
+        auto transaction = tokens.begin_transaction();
+        tokens.discard_a_token();
         auto context_guard = push_temporary_value_parsing_context(FunctionContext { function_token.name });
 
-        if (function_token.name.equals_ignoring_ascii_case("repeat"sv)) {
-            auto maybe_repeat = parse_repeat(function_token.value);
-            if (maybe_repeat.has_value())
-                return CSS::ExplicitGridTrack(maybe_repeat.value());
-            else
+        if (function_token.name.equals_ignoring_ascii_case("fit-content"sv)) {
+            auto function_tokens = TokenStream(function_token.value);
+            function_tokens.discard_whitespace();
+            auto maybe_length_percentage = parse_grid_fixed_breadth(function_tokens);
+            if (!maybe_length_percentage.has_value())
                 return {};
-        } else if (function_token.name.equals_ignoring_ascii_case("minmax"sv)) {
-            auto maybe_min_max_value = parse_min_max(function_token.value);
-            if (maybe_min_max_value.has_value())
-                return CSS::ExplicitGridTrack(maybe_min_max_value.value());
-            else
+            if (function_tokens.has_next_token())
                 return {};
-        } else if (function_token.name.equals_ignoring_ascii_case("fit-content"sv)) {
-            auto maybe_fit_content_value = parse_grid_fit_content(function_token.value);
-            if (maybe_fit_content_value.has_value())
-                return CSS::ExplicitGridTrack(maybe_fit_content_value.value());
-            return {};
-        } else if (auto maybe_calculated = parse_calculated_value(token)) {
-            if (maybe_calculated->is_length())
-                return ExplicitGridTrack(GridSize(maybe_calculated->as_length().length()));
-            if (maybe_calculated->is_percentage())
-                return ExplicitGridTrack(GridSize(maybe_calculated->as_percentage().percentage()));
-            if (maybe_calculated->is_calculated() && maybe_calculated->as_calculated().resolves_to_length_percentage())
-                return ExplicitGridTrack(GridSize(LengthPercentage(maybe_calculated->as_calculated())));
+            transaction.commit();
+            return ExplicitGridTrack(GridSize(GridSize::Type::FitContent, maybe_length_percentage->length_percentage()));
         }
-        return {};
-    } else if (token.is_ident("auto"sv)) {
-        return CSS::ExplicitGridTrack(GridSize(Length::make_auto()));
-    } else if (token.is_block()) {
-        return {};
-    } else {
-        auto grid_size = parse_grid_size(token);
-        if (!grid_size.has_value())
-            return {};
-        return CSS::ExplicitGridTrack(grid_size.value());
     }
+
+    if (auto track_breadth = parse_grid_track_breadth(tokens); track_breadth.has_value()) {
+        return ExplicitGridTrack(track_breadth.value());
+    }
+
+    return {};
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-fixed-size
+Optional<ExplicitGridTrack> Parser::parse_grid_fixed_size(TokenStream<ComponentValue>& tokens)
+{
+    // <fixed-size> = <fixed-breadth> | minmax( <fixed-breadth> , <track-breadth> ) | minmax( <inflexible-breadth> , <fixed-breadth> )
+
+    if (!tokens.has_next_token())
+        return {};
+
+    if (tokens.peek_token().is_function()) {
+        auto const& token = tokens.peek_token();
+        auto const& function_token = token.function();
+        if (function_token.name.equals_ignoring_ascii_case("minmax"sv)) {
+            {
+                GridMinMaxParamParser parse_min = [this](auto& tokens) { return parse_grid_fixed_breadth(tokens); };
+                GridMinMaxParamParser parse_max = [this](auto& tokens) { return parse_grid_track_breadth(tokens); };
+                if (auto result = parse_grid_minmax(tokens, parse_min, parse_max); result.has_value())
+                    return result;
+            }
+            {
+                GridMinMaxParamParser parse_min = [this](auto& tokens) { return parse_grid_inflexible_breadth(tokens); };
+                GridMinMaxParamParser parse_max = [this](auto& tokens) { return parse_grid_fixed_breadth(tokens); };
+                if (auto result = parse_grid_minmax(tokens, parse_min, parse_max); result.has_value())
+                    return result;
+            }
+
+            return {};
+        }
+    }
+
+    if (auto fixed_breadth = parse_grid_fixed_breadth(tokens); fixed_breadth.has_value()) {
+        return ExplicitGridTrack(fixed_breadth.value());
+    }
+
+    return {};
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-track-list
+GridTrackSizeList Parser::parse_grid_track_list(TokenStream<ComponentValue>& tokens)
+{
+    // <track-list> = [ <line-names>? [ <track-size> | <track-repeat> ] ]+ <line-names>?
+
+    auto transaction = tokens.begin_transaction();
+    GridTrackSizeList track_list;
+    auto parsed_track_count = parse_track_list_impl(tokens, track_list, [&](auto& tokens) -> Optional<ExplicitGridTrack> {
+        if (auto track_repeat = parse_grid_track_repeat(tokens); track_repeat.has_value())
+            return ExplicitGridTrack(track_repeat.value());
+        if (auto track_size = parse_grid_track_size(tokens); track_size.has_value())
+            return ExplicitGridTrack(track_size.value());
+        return Optional<ExplicitGridTrack> {};
+    });
+    if (parsed_track_count == 0)
+        return {};
+    transaction.commit();
+    return track_list;
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-auto-track-list
+GridTrackSizeList Parser::parse_grid_auto_track_list(TokenStream<ComponentValue>& tokens)
+{
+    // <auto-track-list> = [ <line-names>? [ <fixed-size> | <fixed-repeat> ] ]* <line-names>? <auto-repeat>
+    //                     [ <line-names>? [ <fixed-size> | <fixed-repeat> ] ]* <line-names>?
+
+    auto transaction = tokens.begin_transaction();
+    GridTrackSizeList track_list;
+    size_t parsed_track_count = 0;
+    auto parse_zero_or_more_fixed_tracks = [&] {
+        parsed_track_count += parse_track_list_impl(tokens, track_list, [&](auto& tokens) -> Optional<ExplicitGridTrack> {
+            if (auto fixed_repeat = parse_grid_fixed_repeat(tokens); fixed_repeat.has_value())
+                return ExplicitGridTrack(fixed_repeat.value());
+            if (auto fixed_size = parse_grid_fixed_size(tokens); fixed_size.has_value())
+                return ExplicitGridTrack(fixed_size.value());
+            return Optional<ExplicitGridTrack> {};
+        });
+    };
+
+    parse_zero_or_more_fixed_tracks();
+    if (!tokens.has_next_token()) {
+        if (parsed_track_count == 0)
+            return {};
+        transaction.commit();
+        return track_list;
+    }
+
+    if (auto auto_repeat = parse_grid_auto_repeat(tokens); auto_repeat.has_value()) {
+        track_list.append(ExplicitGridTrack(auto_repeat.release_value()));
+    } else {
+        return {};
+    }
+
+    parse_zero_or_more_fixed_tracks();
+    transaction.commit();
+    return track_list;
+}
+
+// https://www.w3.org/TR/css-grid-2/#typedef-explicit-track-list
+GridTrackSizeList Parser::parse_explicit_track_list(TokenStream<ComponentValue>& tokens)
+{
+    // <explicit-track-list> = [ <line-names>? <track-size> ]+ <line-names>?
+
+    auto transaction = tokens.begin_transaction();
+    GridTrackSizeList track_list;
+    auto parsed_track_count = parse_track_list_impl(tokens, track_list, [&](auto& tokens) -> Optional<ExplicitGridTrack> {
+        return parse_grid_track_size(tokens);
+    });
+    if (parsed_track_count == 0)
+        return {};
+    transaction.commit();
+    return track_list;
 }
 
 RefPtr<GridTrackPlacementStyleValue const> Parser::parse_grid_track_placement(TokenStream<ComponentValue>& tokens)
@@ -3874,6 +4091,7 @@ RefPtr<StringStyleValue const> Parser::parse_opentype_tag_value(TokenStream<Comp
     return string_value;
 }
 
+// https://drafts.csswg.org/css-fonts/#font-face-src-parsing
 RefPtr<FontSourceStyleValue const> Parser::parse_font_source_value(TokenStream<ComponentValue>& tokens)
 {
     // <font-src> = <url> [ format(<font-format>)]? [ tech( <font-tech>#)]? | local(<family-name>)
@@ -3887,17 +4105,20 @@ RefPtr<FontSourceStyleValue const> Parser::parse_font_source_value(TokenStream<C
         TokenStream function_tokens { function.value };
         if (auto family_name = parse_family_name_value(function_tokens)) {
             transaction.commit();
-            return FontSourceStyleValue::create(FontSourceStyleValue::Local { family_name.release_nonnull() }, {});
+            return FontSourceStyleValue::create(FontSourceStyleValue::Local { family_name.release_nonnull() }, {}, {});
         }
         return nullptr;
     }
 
     // <url> [ format(<font-format>)]? [ tech( <font-tech>#)]?
+
+    // <url>
     auto url = parse_url_function(tokens);
     if (!url.has_value())
         return nullptr;
 
     Optional<FlyString> format;
+    Vector<FontTech> tech;
 
     tokens.discard_whitespace();
 
@@ -3913,7 +4134,43 @@ RefPtr<FontSourceStyleValue const> Parser::parse_font_source_value(TokenStream<C
         if (format_name_token.is(Token::Type::Ident)) {
             format_name = format_name_token.token().ident();
         } else if (format_name_token.is(Token::Type::String)) {
-            format_name = format_name_token.token().string();
+            auto& name_string = format_name_token.token().string();
+            // There's a fixed set of strings allowed here, which we'll assume are case-insensitive:
+            // format("woff2")                 -> format(woff2)
+            // format("woff")                  -> format(woff)
+            // format("truetype")              -> format(truetype)
+            // format("opentype")              -> format(opentype)
+            // format("collection")            -> format(collection)
+            // format("woff2-variations")      -> format(woff2) tech(variations)
+            // format("woff-variations")       -> format(woff) tech(variations)
+            // format("truetype-variations")   -> format(truetype) tech(variations)
+            // format("opentype-variations")   -> format(opentype) tech(variations)
+            if (name_string.equals_ignoring_ascii_case("woff2"sv)) {
+                format_name = "woff2"_fly_string;
+            } else if (name_string.equals_ignoring_ascii_case("woff"sv)) {
+                format_name = "woff"_fly_string;
+            } else if (name_string.equals_ignoring_ascii_case("truetype"sv)) {
+                format_name = "truetype"_fly_string;
+            } else if (name_string.equals_ignoring_ascii_case("opentype"sv)) {
+                format_name = "opentype"_fly_string;
+            } else if (name_string.equals_ignoring_ascii_case("collection"sv)) {
+                format_name = "collection"_fly_string;
+            } else if (name_string.equals_ignoring_ascii_case("woff2-variations"sv)) {
+                format_name = "woff2"_fly_string;
+                tech.append(FontTech::Variations);
+            } else if (name_string.equals_ignoring_ascii_case("woff-variations"sv)) {
+                format_name = "woff"_fly_string;
+                tech.append(FontTech::Variations);
+            } else if (name_string.equals_ignoring_ascii_case("truetype-variations"sv)) {
+                format_name = "truetype"_fly_string;
+                tech.append(FontTech::Variations);
+            } else if (name_string.equals_ignoring_ascii_case("opentype-variations"sv)) {
+                format_name = "opentype"_fly_string;
+                tech.append(FontTech::Variations);
+            } else {
+                dbgln_if(CSS_PARSER_DEBUG, "CSSParser: font source invalid (`format()` parameter \"{}\" is not in the set of valid strings); skipping.", name_string);
+                return nullptr;
+            }
         } else {
             dbgln_if(CSS_PARSER_DEBUG, "CSSParser: font source invalid (`format()` parameter not an ident or string; is: {}); discarding.", format_name_token.to_debug_string());
             return nullptr;
@@ -3935,10 +4192,53 @@ RefPtr<FontSourceStyleValue const> Parser::parse_font_source_value(TokenStream<C
 
     tokens.discard_whitespace();
 
-    // FIXME: [ tech( <font-tech>#)]?
+    // [ tech( <font-tech>#)]?
+    if (tokens.next_token().is_function("tech"sv)) {
+        auto const& function = tokens.consume_a_token().function();
+        auto context_guard = push_temporary_value_parsing_context(FunctionContext { function.name });
+
+        TokenStream function_tokens { function.value };
+        auto tech_items = parse_a_comma_separated_list_of_component_values(function_tokens);
+        if (tech_items.is_empty()) {
+            dbgln_if(CSS_PARSER_DEBUG, "CSSParser: font source invalid (`tech()` has no arguments); discarding.");
+            return nullptr;
+        }
+
+        for (auto const& tech_item : tech_items) {
+            TokenStream tech_tokens { tech_item };
+            tech_tokens.discard_whitespace();
+            auto& ident_token = tech_tokens.consume_a_token();
+            if (!ident_token.is(Token::Type::Ident)) {
+                dbgln_if(CSS_PARSER_DEBUG, "CSSParser: font source invalid (`tech()` parameters must be idents, got: {}); discarding.", ident_token.to_debug_string());
+                return nullptr;
+            }
+            tech_tokens.discard_whitespace();
+            if (tech_tokens.has_next_token()) {
+                dbgln_if(CSS_PARSER_DEBUG, "CSSParser: font source invalid (`tech()` has trailing tokens); discarding.");
+                return nullptr;
+            }
+
+            auto& font_tech_name = ident_token.token().ident();
+            if (auto keyword = keyword_from_string(font_tech_name); keyword.has_value()) {
+                if (auto font_tech = keyword_to_font_tech(*keyword); font_tech.has_value()) {
+
+                    if (!font_tech_is_supported(*font_tech)) {
+                        dbgln_if(CSS_PARSER_DEBUG, "CSSParser: font source tech({}) not supported; skipping.", font_tech_name);
+                        return nullptr;
+                    }
+
+                    tech.append(font_tech.release_value());
+                    continue;
+                }
+            }
+
+            dbgln_if(CSS_PARSER_DEBUG, "CSSParser: font source invalid (`{}` is not a supported value in `tech()`); discarding.", font_tech_name);
+            return nullptr;
+        }
+    }
 
     transaction.commit();
-    return FontSourceStyleValue::create(url.release_value(), move(format));
+    return FontSourceStyleValue::create(url.release_value(), move(format), move(tech));
 }
 
 NonnullRefPtr<CSSStyleValue const> Parser::resolve_unresolved_style_value(ParsingParams const& context, DOM::Element& element, Optional<PseudoElement> pseudo_element, PropertyID property_id, UnresolvedStyleValue const& unresolved)

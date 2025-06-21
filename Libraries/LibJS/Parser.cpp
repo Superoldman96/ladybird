@@ -223,7 +223,7 @@ public:
     ScopePusher const* last_function_scope() const
     {
         for (auto scope_ptr = this; scope_ptr; scope_ptr = scope_ptr->m_parent_scope) {
-            if (scope_ptr->m_function_parameters)
+            if (scope_ptr->m_type == ScopeType::Function || scope_ptr->m_type == ScopeType::ClassStaticInit)
                 return scope_ptr;
         }
         return nullptr;
@@ -328,7 +328,7 @@ public:
             }
 
             if (m_type == ScopeType::Function && m_bound_names.contains(identifier_group_name)) {
-                // NOTE: Currently parser can't determine that named function expression assigment creates scope with binding for funciton name so function names are not considered as candidates to be optmized in global variables access
+                // NOTE: Currently parser can't determine that named function expression assignment creates scope with binding for function name so function names are not considered as candidates to be optimized in global variables access
                 identifier_group.might_be_variable_in_lexical_scope_in_named_function_assignment = true;
             }
 
@@ -1065,8 +1065,12 @@ RefPtr<FunctionExpression const> Parser::try_parse_arrow_function_expression(boo
 
             auto const_correct_parameters = parse_formal_parameters(function_length, FunctionNodeParseOptions::IsArrowFunction | (is_async ? FunctionNodeParseOptions::IsAsyncFunction : 0));
             parameters = fixme_launder_const_through_pointer_cast(const_correct_parameters);
-            if (m_state.errors.size() > previous_syntax_errors && m_state.errors[previous_syntax_errors].message.bytes_as_string_view().starts_with("Unexpected token"sv))
-                return nullptr;
+            if (m_state.errors.size() > previous_syntax_errors) {
+                auto error_message = m_state.errors[previous_syntax_errors].message.bytes_as_string_view();
+                if (error_message.starts_with("Unexpected token"sv) || error_message.starts_with("Duplicate parameter names"sv)) {
+                    return nullptr;
+                }
+            }
             if (!match(TokenType::ParenClose))
                 return nullptr;
             consume();
@@ -1556,8 +1560,6 @@ NonnullRefPtr<ClassExpression const> Parser::parse_class_expression(bool expect_
 
                 {
                     ScopePusher static_init_scope = ScopePusher::static_init_block_scope(*this, *static_init_block);
-                    static_init_scope.set_function_parameters(FunctionParameters::empty());
-
                     parse_statement_list(static_init_block);
                 }
 

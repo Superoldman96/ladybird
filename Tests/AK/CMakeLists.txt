@@ -17,10 +17,10 @@ set(AK_TEST_SOURCES
     TestChecked.cpp
     TestCircularBuffer.cpp
     TestCircularQueue.cpp
+    TestDemangle.cpp
     TestDisjointChunks.cpp
     TestDistinctNumeric.cpp
     TestDoublyLinkedList.cpp
-    TestDuration.cpp
     TestEndian.cpp
     TestEnumBits.cpp
     TestEnumerate.cpp
@@ -70,6 +70,7 @@ set(AK_TEST_SOURCES
     TestStringFloatingPointConversions.cpp
     TestStringUtils.cpp
     TestStringView.cpp
+    TestTime.cpp
     TestTrie.cpp
     TestTuple.cpp
     TestTypeTraits.cpp
@@ -86,6 +87,8 @@ set(AK_TEST_SOURCES
 #  it's own platform-specific tests to avoid if-def soup in the Unix-based tests.
 if(NOT WIN32)
     list(APPEND AK_TEST_SOURCES TestLexicalPath.cpp)
+else()
+    list(APPEND AK_TEST_SOURCES TestDelayLoadWindows.cpp)
 endif()
 
 foreach(source IN LISTS AK_TEST_SOURCES)

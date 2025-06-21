@@ -106,6 +106,8 @@ public:
     bool indeterminate() const { return m_indeterminate; }
     void set_indeterminate(bool);
 
+    bool can_have_text_editing_cursor() const;
+
     GC::Ptr<HTMLDataListElement const> list() const;
 
     void did_pick_color(Optional<Color> picked_color, ColorPickerUpdateState state);
@@ -219,6 +221,8 @@ public:
     bool selection_direction_applies() const;
     bool pattern_applies() const;
     bool multiple_applies() const;
+    bool required_applies() const;
+    bool checked_applies() const;
     bool has_selectable_text() const;
 
     bool supports_a_picker() const;

@@ -31,6 +31,7 @@
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PositionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RectStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ScrollbarColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShadowStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StringStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
@@ -103,7 +104,7 @@ void ComputedProperties::set_animated_property(PropertyID id, NonnullRefPtr<CSSS
     m_animated_property_values.set(id, move(value));
 }
 
-void ComputedProperties::reset_animated_properties()
+void ComputedProperties::reset_animated_properties(Badge<Animations::KeyframeEffect>)
 {
     m_animated_property_values.clear();
 }
@@ -376,8 +377,6 @@ float ComputedProperties::resolve_opacity_value(CSSStyleValue const& value)
             else
                 dbgln("Unable to resolve calc() as opacity (number): {}", value.to_string(SerializationMode::Normal));
         }
-    } else if (value.is_percentage()) {
-        unclamped_opacity = value.as_percentage().percentage().as_fraction();
     }
 
     return clamp(unclamped_opacity, 0.0f, 1.0f);
@@ -639,16 +638,32 @@ TransformBox ComputedProperties::transform_box() const
 
 TransformOrigin ComputedProperties::transform_origin() const
 {
+    auto length_percentage_with_keywords_resolved = [](CSSStyleValue const& value) -> Optional<LengthPercentage> {
+        if (value.is_keyword()) {
+            auto keyword = value.to_keyword();
+            if (keyword == Keyword::Left || keyword == Keyword::Top)
+                return Percentage(0);
+            if (keyword == Keyword::Center)
+                return Percentage(50);
+            if (keyword == Keyword::Right || keyword == Keyword::Bottom)
+                return Percentage(100);
+
+            VERIFY_NOT_REACHED();
+        }
+        return length_percentage_for_style_value(value);
+    };
+
     auto const& value = property(PropertyID::TransformOrigin);
-    if (!value.is_value_list() || value.as_value_list().size() != 2)
+    if (!value.is_value_list() || value.as_value_list().size() != 3)
         return {};
     auto const& list = value.as_value_list();
-    auto x_value = length_percentage_for_style_value(list.values()[0]);
-    auto y_value = length_percentage_for_style_value(list.values()[1]);
-    if (!x_value.has_value() || !y_value.has_value()) {
+
+    auto x_value = length_percentage_with_keywords_resolved(list.values()[0]);
+    auto y_value = length_percentage_with_keywords_resolved(list.values()[1]);
+    auto z_value = length_percentage_for_style_value(list.values()[2]);
+    if (!x_value.has_value() || !y_value.has_value() || !z_value.has_value())
         return {};
-    }
-    return { x_value.value(), y_value.value() };
+    return { x_value.value(), y_value.value(), z_value.value() };
 }
 
 Optional<Color> ComputedProperties::accent_color(Layout::NodeWithStyle const& node) const
@@ -824,10 +839,42 @@ Optional<LengthOrCalculated> ComputedProperties::word_spacing() const
     return {};
 }
 
-WhiteSpace ComputedProperties::white_space() const
+WhiteSpaceCollapse ComputedProperties::white_space_collapse() const
 {
-    auto const& value = property(PropertyID::WhiteSpace);
-    return keyword_to_white_space(value.to_keyword()).release_value();
+    auto const& value = property(PropertyID::WhiteSpaceCollapse);
+    return keyword_to_white_space_collapse(value.to_keyword()).release_value();
+}
+
+WhiteSpaceTrimData ComputedProperties::white_space_trim() const
+{
+    auto const& value = property(PropertyID::WhiteSpaceTrim);
+
+    if (value.is_keyword() && value.to_keyword() == Keyword::None)
+        return WhiteSpaceTrimData {};
+
+    if (value.is_value_list()) {
+        auto white_space_trim_data = WhiteSpaceTrimData {};
+
+        for (auto const& value : value.as_value_list().values()) {
+            switch (value->as_keyword().keyword()) {
+            case Keyword::DiscardBefore:
+                white_space_trim_data.discard_before = true;
+                break;
+            case Keyword::DiscardAfter:
+                white_space_trim_data.discard_after = true;
+                break;
+            case Keyword::DiscardInner:
+                white_space_trim_data.discard_inner = true;
+                break;
+            default:
+                VERIFY_NOT_REACHED();
+            }
+        }
+
+        return white_space_trim_data;
+    }
+
+    VERIFY_NOT_REACHED();
 }
 
 Optional<LengthOrCalculated> ComputedProperties::letter_spacing() const
@@ -888,7 +935,7 @@ ColumnSpan ComputedProperties::column_span() const
     return keyword_to_column_span(value.to_keyword()).release_value();
 }
 
-ComputedProperties::ContentDataAndQuoteNestingLevel ComputedProperties::content(DOM::Element& element, u32 initial_quote_nesting_level) const
+ComputedProperties::ContentDataAndQuoteNestingLevel ComputedProperties::content(DOM::AbstractElement& element_reference, u32 initial_quote_nesting_level) const
 {
     auto const& value = property(PropertyID::Content);
     auto quotes_data = quotes();
@@ -952,7 +999,7 @@ ComputedProperties::ContentDataAndQuoteNestingLevel ComputedProperties::content(
                     break;
                 }
             } else if (item->is_counter()) {
-                builder.append(item->as_counter().resolve(element));
+                builder.append(item->as_counter().resolve(element_reference));
             } else {
                 // TODO: Implement images, and other things.
                 dbgln("`{}` is not supported in `content` (yet?)", item->to_string(SerializationMode::Normal));
@@ -967,7 +1014,7 @@ ComputedProperties::ContentDataAndQuoteNestingLevel ComputedProperties::content(
                 if (item->is_string()) {
                     alt_text_builder.append(item->as_string().string_value());
                 } else if (item->is_counter()) {
-                    alt_text_builder.append(item->as_counter().resolve(element));
+                    alt_text_builder.append(item->as_counter().resolve(element_reference));
                 } else {
                     dbgln("`{}` is not supported in `content` alt-text (yet?)", item->to_string(SerializationMode::Normal));
                 }
@@ -1172,6 +1219,12 @@ Vector<ShadowData> ComputedProperties::box_shadow(Layout::Node const& layout_nod
 Vector<ShadowData> ComputedProperties::text_shadow(Layout::Node const& layout_node) const
 {
     return shadow(PropertyID::TextShadow, layout_node);
+}
+
+TextWrapMode ComputedProperties::text_wrap_mode() const
+{
+    auto const& value = property(PropertyID::TextWrapMode);
+    return keyword_to_text_wrap_mode(value.to_keyword()).release_value();
 }
 
 BoxSizing ComputedProperties::box_sizing() const
@@ -1522,6 +1575,12 @@ BorderCollapse ComputedProperties::border_collapse() const
     return keyword_to_border_collapse(value.to_keyword()).release_value();
 }
 
+EmptyCells ComputedProperties::empty_cells() const
+{
+    auto const& value = property(PropertyID::EmptyCells);
+    return keyword_to_empty_cells(value.to_keyword()).release_value();
+}
+
 Vector<Vector<String>> ComputedProperties::grid_template_areas() const
 {
     auto const& value = property(PropertyID::GridTemplateAreas);
@@ -1811,6 +1870,22 @@ Vector<CounterData> ComputedProperties::counter_data(PropertyID property_id) con
         return {};
 
     dbgln("Unhandled type for {} value: '{}'", string_from_property_id(property_id), value.to_string(SerializationMode::Normal));
+    return {};
+}
+
+ScrollbarColorData ComputedProperties::scrollbar_color(Layout::NodeWithStyle const& layout_node) const
+{
+    auto const& value = property(PropertyID::ScrollbarColor);
+    if (value.is_keyword() && value.as_keyword().keyword() == Keyword::Auto)
+        return InitialValues::scrollbar_color();
+
+    if (value.is_scrollbar_color()) {
+        auto& scrollbar_color_value = value.as_scrollbar_color();
+        auto thumb_color = scrollbar_color_value.thumb_color()->to_color(layout_node);
+        auto track_color = scrollbar_color_value.track_color()->to_color(layout_node);
+        return { thumb_color, track_color };
+    }
+
     return {};
 }
 

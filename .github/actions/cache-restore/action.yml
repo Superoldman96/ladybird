@@ -3,6 +3,9 @@ description: 'Restores caches of downloaded files and build artifacts.'
 author: 'Andrew Kaster <akaster@serenityos.org>'
 
 inputs:
+  runner_labels:
+    description: 'Runner selection labels'
+    required: true
   os:
     description: 'Operating System to restore caches for'
     required: true
@@ -58,10 +61,10 @@ runs:
       id: 'ccache'
       if: ${{ inputs.ccache_path != '' }}
       with:
-          path: ${{ inputs.ccache_path }}
-          key: '"ccache" | "${{ inputs.os }}" | "${{ inputs.arch }}" | "${{ inputs.toolchain }}" | "${{ inputs.cache_key_extra }}" | "${{ inputs.ccache_version }}" | ${{ steps.date-stamp.outputs.timestamp }}'
-          restore-keys: |
-              "ccache" | "${{ inputs.os }}" | "${{ inputs.arch }}" | "${{ inputs.toolchain }}" | "${{ inputs.cache_key_extra }}" | "${{ inputs.ccache_version }}"
+        path: ${{ inputs.ccache_path }}
+        key: '"ccache" | "${{ inputs.os }}" | "${{ inputs.arch }}" | "${{ inputs.toolchain }}" | "${{ inputs.cache_key_extra }}" | "${{ inputs.ccache_version }}" | ${{ steps.date-stamp.outputs.timestamp }}'
+        restore-keys: |
+          "ccache" | "${{ inputs.os }}" | "${{ inputs.arch }}" | "${{ inputs.toolchain }}" | "${{ inputs.cache_key_extra }}" | "${{ inputs.ccache_version }}"
 
     - name: 'Configure Compiler Cache'
       if: ${{ inputs.ccache_path != '' }}

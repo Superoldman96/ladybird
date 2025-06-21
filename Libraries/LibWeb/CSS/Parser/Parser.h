@@ -282,11 +282,35 @@ private:
     Optional<Gfx::UnicodeRange> parse_unicode_range(StringView);
     Vector<Gfx::UnicodeRange> parse_unicode_ranges(TokenStream<ComponentValue>&);
     RefPtr<UnicodeRangeStyleValue const> parse_unicode_range_value(TokenStream<ComponentValue>&);
-    Optional<GridSize> parse_grid_size(ComponentValue const&);
-    Optional<GridFitContent> parse_grid_fit_content(Vector<ComponentValue> const&);
-    Optional<GridMinMax> parse_min_max(Vector<ComponentValue> const&);
-    Optional<GridRepeat> parse_repeat(Vector<ComponentValue> const&);
-    Optional<ExplicitGridTrack> parse_track_sizing_function(ComponentValue const&);
+
+    Optional<GridSize> parse_grid_track_breadth(TokenStream<ComponentValue>&);
+    Optional<GridSize> parse_grid_inflexible_breadth(TokenStream<ComponentValue>&);
+    Optional<GridSize> parse_grid_fixed_breadth(TokenStream<ComponentValue>&);
+
+    Optional<GridLineNames> parse_grid_line_names(TokenStream<ComponentValue>&);
+
+    Optional<GridRepeat> parse_grid_track_repeat(TokenStream<ComponentValue>&);
+    Optional<GridRepeat> parse_grid_auto_repeat(TokenStream<ComponentValue>&);
+    Optional<GridRepeat> parse_grid_fixed_repeat(TokenStream<ComponentValue>&);
+
+    using GridRepeatTypeParser = AK::Function<Optional<GridRepeatParams>(TokenStream<ComponentValue>&)>;
+    using GridTrackParser = AK::Function<Optional<ExplicitGridTrack>(TokenStream<ComponentValue>&)>;
+    Optional<GridRepeat> parse_grid_track_repeat_impl(TokenStream<ComponentValue>&, GridRepeatTypeParser const&, GridTrackParser const&);
+
+    using GridMinMaxParamParser = AK::Function<Optional<GridSize>(TokenStream<ComponentValue>&)>;
+    Optional<ExplicitGridTrack> parse_grid_minmax(TokenStream<ComponentValue>&, GridMinMaxParamParser const&, GridMinMaxParamParser const&);
+
+    Optional<ExplicitGridTrack> parse_grid_track_size(TokenStream<ComponentValue>&);
+    Optional<ExplicitGridTrack> parse_grid_fixed_size(TokenStream<ComponentValue>&);
+
+    enum class AllowTrailingLineNamesForEachTrack {
+        Yes,
+        No
+    };
+    [[nodiscard]] size_t parse_track_list_impl(TokenStream<ComponentValue>& tokens, GridTrackSizeList& output, GridTrackParser const& track_parsing_callback, AllowTrailingLineNamesForEachTrack = AllowTrailingLineNamesForEachTrack::No);
+    GridTrackSizeList parse_grid_track_list(TokenStream<ComponentValue>&);
+    GridTrackSizeList parse_grid_auto_track_list(TokenStream<ComponentValue>&);
+    GridTrackSizeList parse_explicit_track_list(TokenStream<ComponentValue>&);
 
     Optional<URL> parse_url_function(TokenStream<ComponentValue>&);
     RefPtr<URLStyleValue const> parse_url_value(TokenStream<ComponentValue>&);
@@ -412,11 +436,13 @@ private:
     RefPtr<CSSStyleValue const> parse_font_variant_numeric_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_list_style_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_math_depth_value(TokenStream<ComponentValue>&);
+    RefPtr<CSSStyleValue const> parse_opacity_value(PropertyID property_id, TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_overflow_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_place_content_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_place_items_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_place_self_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_quotes_value(TokenStream<ComponentValue>&);
+    RefPtr<CSSStyleValue const> parse_scrollbar_color_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_scrollbar_gutter_value(TokenStream<ComponentValue>&);
     enum class AllowInsetKeyword {
         No,
@@ -435,7 +461,7 @@ private:
     RefPtr<CSSStyleValue const> parse_transition_property_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_translate_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_scale_value(TokenStream<ComponentValue>&);
-    RefPtr<CSSStyleValue const> parse_grid_track_size_list(TokenStream<ComponentValue>&, bool allow_separate_line_name_blocks = false);
+    RefPtr<CSSStyleValue const> parse_grid_track_size_list(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_grid_auto_track_sizes(TokenStream<ComponentValue>&);
     RefPtr<GridAutoFlowStyleValue const> parse_grid_auto_flow_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_grid_track_size_list_shorthand_value(PropertyID, TokenStream<ComponentValue>&);
@@ -445,6 +471,8 @@ private:
     RefPtr<CSSStyleValue const> parse_grid_area_shorthand_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_grid_shorthand_value(TokenStream<ComponentValue>&);
     RefPtr<CSSStyleValue const> parse_touch_action_value(TokenStream<ComponentValue>&);
+    RefPtr<CSSStyleValue const> parse_white_space_shorthand(TokenStream<ComponentValue>&);
+    RefPtr<CSSStyleValue const> parse_white_space_trim_value(TokenStream<ComponentValue>&);
 
     RefPtr<CSSStyleValue const> parse_list_of_time_values(PropertyID, TokenStream<ComponentValue>&);
 

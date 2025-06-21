@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/IterationDecision.h>
 #include <AK/Optional.h>
 #include <LibWeb/ARIA/ARIAMixin.h>
 #include <LibWeb/ARIA/AttributeNames.h>
@@ -14,13 +15,14 @@
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/ShadowRootPrototype.h>
 #include <LibWeb/CSS/CascadedProperties.h>
-#include <LibWeb/CSS/CountersSet.h>
+#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleInvalidation.h>
 #include <LibWeb/CSS/StyleProperty.h>
 #include <LibWeb/DOM/ChildNode.h>
 #include <LibWeb/DOM/NonDocumentTypeChildNode.h>
 #include <LibWeb/DOM/ParentNode.h>
+#include <LibWeb/DOM/PseudoElement.h>
 #include <LibWeb/DOM/QualifiedName.h>
 #include <LibWeb/DOM/Slottable.h>
 #include <LibWeb/HTML/AttributeNames.h>
@@ -216,7 +218,7 @@ public:
     void set_pseudo_element_computed_properties(CSS::PseudoElement, GC::Ptr<CSS::ComputedProperties>);
     GC::Ptr<CSS::ComputedProperties> pseudo_element_computed_properties(CSS::PseudoElement);
 
-    void reset_animated_css_properties();
+    Optional<PseudoElement&> get_pseudo_element(CSS::PseudoElement) const;
 
     GC::Ptr<CSS::CSSStyleProperties> inline_style() { return m_inline_style; }
     GC::Ptr<CSS::CSSStyleProperties const> inline_style() const { return m_inline_style; }
@@ -274,6 +276,7 @@ public:
 
     virtual void did_receive_focus() { }
     virtual void did_lose_focus() { }
+    bool should_indicate_focus() const;
 
     static GC::Ptr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, GC::Ref<CSS::ComputedProperties>, Element*);
 
@@ -297,8 +300,8 @@ public:
     void set_scroll_top(double y);
     void set_scroll_left(double x);
 
-    int scroll_width() const;
-    int scroll_height() const;
+    int scroll_width();
+    int scroll_height();
 
     bool is_actually_disabled() const;
 
@@ -370,13 +373,14 @@ public:
     void unregister_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, GC::Ref<IntersectionObserver::IntersectionObserver>);
     IntersectionObserver::IntersectionObserverRegistration& get_intersection_observer_registration(Badge<DOM::Document>, IntersectionObserver::IntersectionObserver const&);
 
-    enum class ScrollOffsetFor {
-        Self,
-        PseudoBefore,
-        PseudoAfter
+    CSSPixelPoint scroll_offset(Optional<CSS::PseudoElement> type) const;
+    void set_scroll_offset(Optional<CSS::PseudoElement> type, CSSPixelPoint offset);
+
+    enum class TranslationMode {
+        TranslateEnabled,
+        NoTranslate
     };
-    CSSPixelPoint scroll_offset(ScrollOffsetFor type) const { return m_scroll_offset[to_underlying(type)]; }
-    void set_scroll_offset(ScrollOffsetFor type, CSSPixelPoint offset) { m_scroll_offset[to_underlying(type)] = offset; }
+    TranslationMode translation_mode() const;
 
     enum class Dir {
         Ltr,
@@ -410,10 +414,9 @@ public:
     bool rendered_in_top_layer() const { return m_rendered_in_top_layer; }
 
     bool has_non_empty_counters_set() const { return m_counters_set; }
-    Optional<CSS::CountersSet const&> counters_set();
+    Optional<CSS::CountersSet const&> counters_set() const;
     CSS::CountersSet& ensure_counters_set();
-    void resolve_counters(CSS::ComputedProperties&);
-    void inherit_counters();
+    void set_counters_set(OwnPtr<CSS::CountersSet>&&);
 
     ProximityToTheViewport proximity_to_the_viewport() const { return m_proximity_to_the_viewport; }
     void determine_proximity_to_the_viewport();
@@ -460,9 +463,46 @@ public:
         return affected_by_direct_sibling_combinator() || affected_by_indirect_sibling_combinator() || affected_by_sibling_position_or_count_pseudo_class() || affected_by_nth_child_pseudo_class();
     }
 
-    size_t number_of_owned_list_items() const;
+    i32 number_of_owned_list_items() const;
     Element* list_owner() const;
-    size_t ordinal_value() const;
+    void maybe_invalidate_ordinals_for_list_owner(Optional<Element*> skip_node = {});
+    i32 ordinal_value();
+
+    template<typename Callback>
+    void for_each_numbered_item_owned_by_list_owner(Callback callback) const
+    {
+        const_cast<Element*>(this)->for_each_numbered_item_owned_by_list_owner(move(callback));
+    }
+
+    template<typename Callback>
+    void for_each_numbered_item_owned_by_list_owner(Callback callback)
+    {
+        for (auto* node = this->first_child(); node != nullptr; node = node->next_in_pre_order(this)) {
+            if (!is<Element>(*node))
+                continue;
+
+            static_cast<Element*>(node)->m_is_contained_in_list_subtree = true;
+
+            if (node->is_html_ol_ul_menu_element()) {
+                // Skip list nodes and their descendents. They have their own, unrelated ordinals.
+                while (node->last_child() != nullptr) // Find the last node (preorder) in the subtree headed by node. O(1).
+                    node = node->last_child();
+
+                continue;
+            }
+
+            if (!node->layout_node())
+                continue; // Skip nodes that do not participate in the layout.
+
+            auto* element = static_cast<Element*>(node);
+
+            if (!element->computed_properties()->display().is_list_item())
+                continue; // Skip nodes that are not list items.
+
+            if (callback(element) == IterationDecision::Break)
+                return;
+        }
+    }
 
     void set_pointer_capture(WebIDL::Long pointer_id);
     void release_pointer_capture(WebIDL::Long pointer_id);
@@ -520,28 +560,8 @@ private:
     GC::Ptr<CSS::ComputedProperties> m_computed_properties;
     HashMap<FlyString, CSS::StyleProperty> m_custom_properties;
 
-    struct PseudoElement : public JS::Cell {
-        GC_CELL(PseudoElement, JS::Cell);
-        GC_DECLARE_ALLOCATOR(PseudoElement);
-
-        GC::Ptr<Layout::NodeWithStyle> layout_node;
-        GC::Ptr<CSS::CascadedProperties> cascaded_properties;
-        GC::Ptr<CSS::ComputedProperties> computed_properties;
-        HashMap<FlyString, CSS::StyleProperty> custom_properties;
-
-    private:
-        virtual void visit_edges(JS::Cell::Visitor&) override;
-    };
-    // https://drafts.csswg.org/css-view-transitions/#pseudo-element-tree
-    struct PseudoElementTreeNode
-        : public PseudoElement
-        , TreeNode<PseudoElementTreeNode> {
-        GC_CELL(PseudoElementTreeNode, PseudoElement);
-        GC_DECLARE_ALLOCATOR(PseudoElementTreeNode);
-    };
     using PseudoElementData = HashMap<CSS::PseudoElement, GC::Ref<PseudoElement>>;
     mutable OwnPtr<PseudoElementData> m_pseudo_element_data;
-    Optional<PseudoElement&> get_pseudo_element(CSS::PseudoElement) const;
     PseudoElement& ensure_pseudo_element(CSS::PseudoElement) const;
 
     Optional<CSS::PseudoElement> m_use_pseudo_element;
@@ -570,7 +590,7 @@ private:
     // Element objects have an internal [[RegisteredIntersectionObservers]] slot, which is initialized to an empty list.
     OwnPtr<Vector<IntersectionObserver::IntersectionObserverRegistration>> m_registered_intersection_observers;
 
-    Array<CSSPixelPoint, 3> m_scroll_offset;
+    CSSPixelPoint m_scroll_offset;
 
     bool m_in_top_layer : 1 { false };
     bool m_rendered_in_top_layer : 1 { false };
@@ -589,6 +609,10 @@ private:
 
     // https://drafts.csswg.org/css-contain/#proximity-to-the-viewport
     ProximityToTheViewport m_proximity_to_the_viewport { ProximityToTheViewport::NotDetermined };
+
+    // https://html.spec.whatwg.org/multipage/grouping-content.html#ordinal-value
+    Optional<i32> m_ordinal_value;
+    bool m_is_contained_in_list_subtree { false };
 };
 
 template<>
@@ -625,9 +649,17 @@ inline bool Element::has_pseudo_element(CSS::PseudoElement type) const
     auto pseudo_element = m_pseudo_element_data->get(type);
     if (!pseudo_element.has_value())
         return false;
-    return pseudo_element.value()->layout_node;
+    return pseudo_element.value()->layout_node();
 }
 
-WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm&, Optional<FlyString> namespace_, FlyString const& qualified_name);
+bool is_valid_namespace_prefix(FlyString const&);
+bool is_valid_attribute_local_name(FlyString const&);
+bool is_valid_element_local_name(FlyString const&);
+
+enum class ValidationContext {
+    Attribute,
+    Element,
+};
+WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm&, Optional<FlyString> namespace_, FlyString const& qualified_name, ValidationContext context);
 
 }

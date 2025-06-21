@@ -2,6 +2,7 @@
  * Copyright (c) 2020-2022, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2022, Sam Atkins <atkinssj@serenityos.org>
  * Copyright (c) 2024, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -10,8 +11,6 @@
 #include <LibGfx/AffineTransform.h>
 #include <LibGfx/Matrix4x4.h>
 #include <LibGfx/Rect.h>
-#include <LibWeb/CSS/StyleValues/TransformationStyleValue.h>
-#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/ReplacedBox.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/Blending.h>
@@ -115,8 +114,6 @@ void StackingContext::paint_descendants(PaintContext& context, Paintable const& 
     paintable.before_children_paint(context, to_paint_phase(phase));
 
     paintable.for_each_child([&context, phase](auto& child) {
-        auto const& z_index = child.computed_values().z_index();
-
         if (child.layout_node().is_svg_svg_box()) {
             paint_svg(context, static_cast<PaintableBox const&>(child), to_paint_phase(phase));
             return IterationDecision::Continue;
@@ -130,8 +127,8 @@ void StackingContext::paint_descendants(PaintContext& context, Paintable const& 
         //       "For each one of these, treat the element as if it created a new stacking context, but any positioned
         //       descendants and descendants which actually create a new stacking context should be considered part of
         //       the parent stacking context, not this new one."
-        auto grid_item_should_be_treated_as_stacking_context = child.layout_node().is_grid_item() && !z_index.has_value();
-        if (grid_item_should_be_treated_as_stacking_context) {
+        auto const& z_index = [&] { return child.computed_values().z_index(); };
+        if (child.layout_node().is_grid_item() && !z_index().has_value()) {
             // FIXME: This may not be fully correct with respect to the paint phases.
             if (phase == StackingContextPaintPhase::Foreground)
                 paint_node_as_stacking_context(child, context);
@@ -143,15 +140,14 @@ void StackingContext::paint_descendants(PaintContext& context, Paintable const& 
         // element as if it created a new stacking context, but any positioned descendants and
         // descendants which actually create a new stacking context should be considered part of the
         // parent stacking context, not this new one.
-        auto floating_item_should_be_treated_as_stacking_context = child.is_floating() && !child.is_positioned() && !z_index.has_value();
-        if (floating_item_should_be_treated_as_stacking_context) {
+        if (child.is_floating() && !child.is_positioned() && !z_index().has_value()) {
             if (phase == StackingContextPaintPhase::Floats) {
                 paint_node_as_stacking_context(child, context);
             }
             return IterationDecision::Continue;
         }
 
-        if (child.is_positioned() && z_index.value_or(0) == 0)
+        if (child.is_positioned() && z_index().value_or(0) == 0)
             return IterationDecision::Continue;
 
         bool child_is_inline_or_replaced = child.is_inline() || is<Layout::ReplacedBox>(child.layout_node());
@@ -348,8 +344,8 @@ void StackingContext::paint(PaintContext& context) const
     context.display_list_recorder().push_stacking_context(push_stacking_context_params);
 
     auto const& filter = computed_values.filter();
-    if (!filter.is_empty()) {
-        context.display_list_recorder().apply_filters(paintable_box().computed_values().filter());
+    if (filter.has_value()) {
+        context.display_list_recorder().apply_filter(paintable_box().computed_values().filter().value());
     }
 
     if (auto mask_image = computed_values.mask_image()) {
@@ -362,8 +358,6 @@ void StackingContext::paint(PaintContext& context) const
     }
 
     if (auto masking_area = paintable_box().get_masking_area(); masking_area.has_value()) {
-        if (masking_area->is_empty())
-            return;
         auto mask_bitmap = paintable_box().calculate_mask(context, *masking_area);
         if (mask_bitmap) {
             auto masking_area_rect = context.enclosing_device_rect(*masking_area).to_type<int>();
@@ -371,9 +365,11 @@ void StackingContext::paint(PaintContext& context) const
         }
     }
 
+    context.display_list_recorder().push_scroll_frame_id({});
     paint_internal(context);
+    context.display_list_recorder().pop_scroll_frame_id();
 
-    if (!filter.is_empty()) {
+    if (filter.has_value()) {
         context.display_list_recorder().restore();
     }
 

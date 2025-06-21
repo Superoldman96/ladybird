@@ -11,7 +11,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibCore/DateTime.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/RegExpObject.h>
@@ -420,7 +419,7 @@ WebIDL::ExceptionOr<void> HTMLInputElement::show_picker()
     // and this's type attribute is not in the File Upload state or Color state, then throw a "SecurityError" DOMException.
     // NOTE: File and Color inputs are exempted from this check for historical reason: their input activation behavior also shows their pickers,
     //       and has never been guarded by an origin check.
-    if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(*this).top_level_origin)
+    if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(*this).top_level_origin.value())
         && m_type != TypeAttributeState::FileUpload && m_type != TypeAttributeState::Color) {
         return WebIDL::SecurityError::create(realm(), "Cross origin pickers are not allowed"_string);
     }
@@ -1594,6 +1593,14 @@ WebIDL::ExceptionOr<void> HTMLInputElement::set_type(String const& type)
     return set_attribute(HTML::AttributeNames::type, type);
 }
 
+bool HTMLInputElement::can_have_text_editing_cursor() const
+{
+    if (first_is_one_of(type_state(), TypeAttributeState::SubmitButton, TypeAttributeState::ResetButton, TypeAttributeState::Button))
+        return false;
+
+    return true;
+}
+
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#valid-simple-colour
 static bool is_valid_simple_color(StringView value)
 {
@@ -2318,8 +2325,8 @@ static String convert_number_to_date_string(double input)
     // The algorithm to convert a number to a string, given a number input, is as follows: Return a valid
     // date string that represents the date that, in UTC, is current input milliseconds after midnight UTC
     // on the morning of 1970-01-01 (the time represented by the value "1970-01-01T00:00:00.0Z").
-    auto date = Core::DateTime::from_timestamp(input / 1000.);
-    return MUST(date.to_string("%Y-%m-%d"sv, Core::DateTime::LocalTime::No));
+    auto date = AK::UnixDateTime::from_seconds_since_epoch(input / 1000.);
+    return MUST(date.to_string("%Y-%m-%d"sv));
 }
 
 // https://html.spec.whatwg.org/multipage/input.html#time-state-(type=time):concept-input-value-number-string
@@ -2996,6 +3003,43 @@ bool HTMLInputElement::multiple_applies() const
     switch (type_state()) {
     case TypeAttributeState::Email:
     case TypeAttributeState::FileUpload:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// https://html.spec.whatwg.org/multipage/input.html#do-not-apply
+bool HTMLInputElement::required_applies() const
+{
+    switch (type_state()) {
+    case TypeAttributeState::Text:
+    case TypeAttributeState::Search:
+    case TypeAttributeState::Telephone:
+    case TypeAttributeState::URL:
+    case TypeAttributeState::Email:
+    case TypeAttributeState::Password:
+    case TypeAttributeState::Date:
+    case TypeAttributeState::Month:
+    case TypeAttributeState::Week:
+    case TypeAttributeState::Time:
+    case TypeAttributeState::LocalDateAndTime:
+    case TypeAttributeState::Number:
+    case TypeAttributeState::Checkbox:
+    case TypeAttributeState::RadioButton:
+    case TypeAttributeState::FileUpload:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// https://html.spec.whatwg.org/multipage/input.html#do-not-apply
+bool HTMLInputElement::checked_applies() const
+{
+    switch (type_state()) {
+    case TypeAttributeState::Checkbox:
+    case TypeAttributeState::RadioButton:
         return true;
     default:
         return false;

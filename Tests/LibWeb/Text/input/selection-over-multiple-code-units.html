@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<script src="include.js"></script>
+😭foobar😭
+<script>
+test(() => {
+    document.body.offsetWidth;  // force layout
+
+    internals.mouseDown(55, 20);
+    internals.movePointerTo(110, 20);
+
+    const activeRange = window.getSelection().getRangeAt(0);
+    printElement(activeRange.startContainer);
+    println(activeRange.startOffset);
+    printElement(activeRange.endContainer);
+    println(activeRange.endOffset);
+});
+</script>

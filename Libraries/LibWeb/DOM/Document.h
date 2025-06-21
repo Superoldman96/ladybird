@@ -15,7 +15,6 @@
 #include <AK/String.h>
 #include <AK/Vector.h>
 #include <AK/WeakPtr.h>
-#include <LibCore/DateTime.h>
 #include <LibCore/Forward.h>
 #include <LibJS/Console.h>
 #include <LibJS/Forward.h>
@@ -30,6 +29,7 @@
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CrossOrigin/OpenerPolicy.h>
 #include <LibWeb/HTML/DocumentReadyState.h>
+#include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/History.h>
 #include <LibWeb/HTML/LazyLoadingElement.h>
@@ -177,7 +177,7 @@ public:
 
     [[nodiscard]] static GC::Ref<Document> create(JS::Realm&, URL::URL const& url = URL::about_blank());
     [[nodiscard]] static GC::Ref<Document> create_for_fragment_parsing(JS::Realm&);
-    static WebIDL::ExceptionOr<GC::Ref<Document>> construct_impl(JS::Realm&);
+    static GC::Ref<Document> construct_impl(JS::Realm&);
     virtual ~Document() override;
 
     // AD-HOC: This number increments whenever a node is added or removed from the document, or an element attribute changes.
@@ -433,6 +433,9 @@ public:
 
     void set_focused_element(GC::Ptr<Element>);
 
+    HTML::FocusTrigger last_focus_trigger() const { return m_last_focus_trigger; }
+    void set_last_focus_trigger(HTML::FocusTrigger trigger) { m_last_focus_trigger = trigger; }
+
     Element const* active_element() const { return m_active_element.ptr(); }
     void set_active_element(GC::Ptr<Element>);
 
@@ -562,12 +565,6 @@ public:
     [[nodiscard]] bool is_temporary_document_for_fragment_parsing() const { return m_temporary_document_for_fragment_parsing == TemporaryDocumentForFragmentParsing::Yes; }
 
     static bool is_valid_name(String const&);
-
-    struct PrefixAndTagName {
-        FlyString prefix;
-        FlyString tag_name;
-    };
-    static WebIDL::ExceptionOr<PrefixAndTagName> validate_qualified_name(JS::Realm&, FlyString const& qualified_name);
 
     GC::Ref<NodeIterator> create_node_iterator(Node& root, unsigned what_to_show, GC::Ptr<NodeFilter>);
     GC::Ref<TreeWalker> create_tree_walker(Node& root, unsigned what_to_show, GC::Ptr<NodeFilter>);
@@ -814,7 +811,7 @@ public:
     // Does document represent an embedded svg img
     [[nodiscard]] bool is_decoded_svg() const;
 
-    Vector<GC::Root<DOM::Range>> find_matching_text(String const&, CaseSensitivity);
+    Vector<GC::Root<Range>> find_matching_text(String const&, CaseSensitivity);
 
     void parse_html_from_a_string(StringView);
     static GC::Ref<Document> parse_html_unsafe(JS::VM&, StringView);
@@ -1013,6 +1010,8 @@ private:
     bool m_editable { false };
 
     GC::Ptr<Element> m_focused_element;
+    HTML::FocusTrigger m_last_focus_trigger { HTML::FocusTrigger::Other };
+
     GC::Ptr<Element> m_active_element;
     GC::Ptr<Element> m_target_element;
 
@@ -1097,7 +1096,7 @@ private:
     String m_referrer;
 
     // https://dom.spec.whatwg.org/#concept-document-origin
-    URL::Origin m_origin;
+    Optional<URL::Origin> m_origin;
 
     GC::Ptr<HTMLCollection> m_applets;
     GC::Ptr<HTMLCollection> m_anchors;
@@ -1201,7 +1200,7 @@ private:
 
     ShadowRoot::DocumentShadowRootList m_shadow_roots;
 
-    Optional<Core::DateTime> m_last_modified;
+    Optional<AK::UnixDateTime> m_last_modified;
 
     u64 m_dom_tree_version { 0 };
     u64 m_character_data_version { 0 };

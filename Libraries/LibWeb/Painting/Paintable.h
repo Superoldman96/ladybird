@@ -7,7 +7,6 @@
 #pragma once
 
 #include <LibGC/Root.h>
-#include <LibGfx/Cursor.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/InvalidateDisplayList.h>
@@ -28,7 +27,7 @@ enum class PaintPhase {
 
 struct HitTestResult {
     GC::Root<Paintable> paintable;
-    int index_in_node { 0 };
+    size_t index_in_node { 0 };
     Optional<CSSPixels> vertical_distance {};
     Optional<CSSPixels> horizontal_distance {};
 
@@ -57,7 +56,7 @@ class Paintable
 public:
     virtual ~Paintable();
 
-    [[nodiscard]] bool is_visible() const;
+    [[nodiscard]] bool is_visible() const { return m_visible; }
     [[nodiscard]] bool is_positioned() const { return m_positioned; }
     [[nodiscard]] bool is_fixed_position() const { return m_fixed_position; }
     [[nodiscard]] bool is_sticky_position() const { return m_sticky_position; }
@@ -169,6 +168,7 @@ private:
 
     SelectionState m_selection_state { SelectionState::None };
 
+    bool m_visible : 1 { false };
     bool m_positioned : 1 { false };
     bool m_fixed_position : 1 { false };
     bool m_sticky_position : 1 { false };

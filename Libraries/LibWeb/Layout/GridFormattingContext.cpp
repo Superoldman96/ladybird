@@ -153,13 +153,6 @@ GridFormattingContext::GridTrack GridFormattingContext::GridTrack::create_from_d
     // NOTE: repeat() is expected to be expanded beforehand.
     VERIFY(!definition.is_repeat());
 
-    if (definition.is_fit_content()) {
-        return GridTrack {
-            .min_track_sizing_function = CSS::GridSize::make_auto(),
-            .max_track_sizing_function = definition.fit_content().max_grid_size(),
-        };
-    }
-
     if (definition.is_minmax()) {
         return GridTrack {
             .min_track_sizing_function = definition.minmax().min_grid_size(),
@@ -349,6 +342,14 @@ GridFormattingContext::PlacementPosition GridFormattingContext::resolve_grid_pos
         } else {
             result.start = 0;
         }
+    }
+
+    if (!placement_start.is_positioned() && placement_end.is_positioned() && !placement_end.is_span()) {
+        if (result.span == 0)
+            result.span = 1;
+        result.start = result.end - result.span;
+        if (result.start < 0)
+            result.start = 0;
     }
 
     if (placement_start.is_positioned() && placement_end.is_positioned()) {
@@ -569,18 +570,13 @@ void GridFormattingContext::initialize_grid_tracks_from_definition(GridDimension
                 repeat_count = track_definition.repeat().repeat_count();
         }
         for (auto _ = 0; _ < repeat_count; _++) {
-            switch (track_definition.type()) {
-            case CSS::ExplicitGridTrack::Type::Default:
-            case CSS::ExplicitGridTrack::Type::FitContent:
-            case CSS::ExplicitGridTrack::Type::MinMax:
+            if (track_definition.is_default() || track_definition.is_minmax()) {
                 tracks.append(GridTrack::create_from_definition(track_definition));
-                break;
-            case CSS::ExplicitGridTrack::Type::Repeat:
+            } else if (track_definition.is_repeat()) {
                 for (auto& explicit_grid_track : track_definition.repeat().grid_track_size_list().track_list()) {
                     tracks.append(GridTrack::create_from_definition(explicit_grid_track));
                 }
-                break;
-            default:
+            } else {
                 VERIFY_NOT_REACHED();
             }
         }
@@ -638,6 +634,9 @@ void GridFormattingContext::initialize_grid_tracks_for_columns_and_rows()
         }
         implicit_row_index++;
     }
+
+    m_column_lines.resize(m_grid_columns.size() + 1);
+    m_row_lines.resize(m_grid_rows.size() + 1);
 }
 
 void GridFormattingContext::initialize_gap_tracks(AvailableSpace const& available_space)
@@ -2068,17 +2067,24 @@ void GridFormattingContext::run(AvailableSpace const& available_space)
             independent_formatting_context->parent_context_did_dimension_child_root_box();
     }
 
-    Vector<Variant<CSS::ExplicitGridTrack, CSS::GridLineNames>> grid_track_columns;
-    grid_track_columns.ensure_capacity(m_grid_columns.size());
-    for (auto const& column : m_grid_columns) {
-        grid_track_columns.append(CSS::ExplicitGridTrack { CSS::GridSize { CSS::LengthPercentage(CSS::Length::make_px(column.base_size)) } });
-    }
+    auto serialize = [](auto const& tracks, auto const& lines) {
+        CSS::GridTrackSizeList result;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            auto const& line = lines[i];
+            if (!line.names.is_empty()) {
+                result.append(CSS::GridLineNames { line.names });
+            }
 
-    Vector<Variant<CSS::ExplicitGridTrack, CSS::GridLineNames>> grid_track_rows;
-    grid_track_rows.ensure_capacity(m_grid_rows.size());
-    for (auto const& row : m_grid_rows) {
-        grid_track_rows.append(CSS::ExplicitGridTrack { CSS::GridSize { CSS::LengthPercentage(CSS::Length::make_px(row.base_size)) } });
-    }
+            if (i < tracks.size()) {
+                auto const& track = tracks[i];
+                result.append(CSS::ExplicitGridTrack { CSS::GridSize { CSS::LengthPercentage(CSS::Length::make_px(track.base_size)) } });
+            }
+        }
+        return result;
+    };
+
+    auto grid_track_columns = serialize(m_grid_columns, m_column_lines);
+    auto grid_track_rows = serialize(m_grid_rows, m_row_lines);
 
     // getComputedStyle() needs to return the resolved values of grid-template-columns and grid-template-rows
     // so they need to be saved in the state, and then assigned to paintables in LayoutState::commit()
@@ -2296,14 +2302,14 @@ void GridFormattingContext::init_grid_lines(GridDimension dimension)
     auto const& lines_definition = dimension == GridDimension::Column ? grid_computed_values.grid_template_columns() : grid_computed_values.grid_template_rows();
     auto& lines = dimension == GridDimension::Column ? m_column_lines : m_row_lines;
 
-    Vector<String> line_names;
+    Vector<FlyString> line_names;
     Function<void(CSS::GridTrackSizeList const&)> expand_lines_definition = [&](CSS::GridTrackSizeList const& lines_definition) {
         for (auto const& item : lines_definition.list()) {
             if (item.has<CSS::GridLineNames>()) {
                 line_names.extend(item.get<CSS::GridLineNames>().names);
             } else if (item.has<CSS::ExplicitGridTrack>()) {
                 auto const& explicit_track = item.get<CSS::ExplicitGridTrack>();
-                if (explicit_track.is_default() || explicit_track.is_minmax() || explicit_track.is_fit_content()) {
+                if (explicit_track.is_default() || explicit_track.is_minmax()) {
                     lines.append({ .names = line_names });
                     line_names.clear();
                 } else if (explicit_track.is_repeat()) {

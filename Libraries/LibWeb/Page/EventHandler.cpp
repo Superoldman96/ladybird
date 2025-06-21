@@ -70,7 +70,9 @@ static DOM::Node* input_control_associated_with_ancestor_label_element(Painting:
 static bool parent_element_for_event_dispatch(Painting::Paintable& paintable, GC::Ptr<DOM::Node>& node, Layout::Node*& layout_node)
 {
     layout_node = &paintable.layout_node();
-    if (layout_node->is_generated_for_backdrop_pseudo_element()) {
+    if (layout_node->is_generated_for_backdrop_pseudo_element()
+        || layout_node->is_generated_for_after_pseudo_element()
+        || layout_node->is_generated_for_before_pseudo_element()) {
         node = layout_node->pseudo_element_generator();
         layout_node = node->layout_node();
     }
@@ -210,7 +212,7 @@ static CSSPixelPoint compute_mouse_event_offset(CSSPixelPoint position, Painting
 }
 
 // https://drafts.csswg.org/css-ui/#propdef-user-select
-static void set_user_selection(GC::Ptr<DOM::Node> anchor_node, unsigned anchor_offset, GC::Ptr<DOM::Node> focus_node, unsigned focus_offset, Selection::Selection* selection, CSS::UserSelect user_select)
+static void set_user_selection(GC::Ptr<DOM::Node> anchor_node, size_t anchor_offset, GC::Ptr<DOM::Node> focus_node, size_t focus_offset, Selection::Selection* selection, CSS::UserSelect user_select)
 {
     // https://drafts.csswg.org/css-ui/#valdef-user-select-contain
     // NOTE: This is clamping the focus node to any node with user-select: contain that stands between it and the anchor node.
@@ -677,7 +679,7 @@ EventResult EventHandler::handle_mousedown(CSSPixelPoint viewport_position, CSSP
                 // When a user activates a click focusable focusable area, the user agent must run the focusing steps on the focusable area with focus trigger set to "click".
                 // Spec Note: Note that focusing is not an activation behavior, i.e. calling the click() method on an element or dispatching a synthetic click event on it won't cause the element to get focused.
                 if (focus_candidate)
-                    HTML::run_focusing_steps(focus_candidate, nullptr, "click"sv);
+                    HTML::run_focusing_steps(focus_candidate, nullptr, HTML::FocusTrigger::Click);
                 else if (auto* focused_element = document->focused_element())
                     HTML::run_unfocusing_steps(focused_element);
 
@@ -987,24 +989,24 @@ EventResult EventHandler::handle_drag_and_drop_event(DragEvent::Type type, CSSPi
     VERIFY_NOT_REACHED();
 }
 
-bool EventHandler::focus_next_element()
+EventResult EventHandler::focus_next_element()
 {
     if (!m_navigable->active_document())
-        return false;
+        return EventResult::Dropped;
     if (!m_navigable->active_document()->is_fully_active())
-        return false;
+        return EventResult::Dropped;
 
-    auto set_focus_to_first_focusable_element = [&]() {
+    auto set_focus_to_first_focusable_element = [&] {
         auto* element = m_navigable->active_document()->first_child_of_type<DOM::Element>();
 
         for (; element; element = element->next_element_in_pre_order()) {
             if (element->is_focusable()) {
-                m_navigable->active_document()->set_focused_element(element);
-                return true;
+                HTML::run_focusing_steps(element, nullptr, HTML::FocusTrigger::Key);
+                return EventResult::Handled;
             }
         }
 
-        return false;
+        return EventResult::Dropped;
     };
 
     auto* element = m_navigable->active_document()->focused_element();
@@ -1017,29 +1019,29 @@ bool EventHandler::focus_next_element()
     if (!element)
         return set_focus_to_first_focusable_element();
 
-    m_navigable->active_document()->set_focused_element(element);
-    return true;
+    HTML::run_focusing_steps(element, nullptr, HTML::FocusTrigger::Key);
+    return EventResult::Handled;
 }
 
-bool EventHandler::focus_previous_element()
+EventResult EventHandler::focus_previous_element()
 {
     if (!m_navigable->active_document())
-        return false;
+        return EventResult::Dropped;
     if (!m_navigable->active_document()->is_fully_active())
-        return false;
+        return EventResult::Dropped;
 
-    auto set_focus_to_last_focusable_element = [&]() {
+    auto set_focus_to_last_focusable_element = [&] {
         // FIXME: This often returns the HTML element itself, which has no previous sibling.
         auto* element = m_navigable->active_document()->last_child_of_type<DOM::Element>();
 
         for (; element; element = element->previous_element_in_pre_order()) {
             if (element->is_focusable()) {
-                m_navigable->active_document()->set_focused_element(element);
-                return true;
+                HTML::run_focusing_steps(element, nullptr, HTML::FocusTrigger::Key);
+                return EventResult::Handled;
             }
         }
 
-        return false;
+        return EventResult::Dropped;
     };
 
     auto* element = m_navigable->active_document()->focused_element();
@@ -1052,8 +1054,8 @@ bool EventHandler::focus_previous_element()
     if (!element)
         return set_focus_to_last_focusable_element();
 
-    m_navigable->active_document()->set_focused_element(element);
-    return true;
+    HTML::run_focusing_steps(element, nullptr, HTML::FocusTrigger::Key);
+    return EventResult::Handled;
 }
 
 constexpr bool should_ignore_keydown_event(u32 code_point, u32 modifiers)
@@ -1175,9 +1177,7 @@ EventResult EventHandler::handle_keydown(UIEvents::KeyCode key, u32 modifiers, u
 
     if (!(modifiers & UIEvents::KeyModifier::Mod_Ctrl)) {
         if (key == UIEvents::KeyCode::Key_Tab) {
-            if (modifiers & UIEvents::KeyModifier::Mod_Shift)
-                return focus_previous_element() ? EventResult::Handled : EventResult::Dropped;
-            return focus_next_element() ? EventResult::Handled : EventResult::Dropped;
+            return modifiers & UIEvents::KeyModifier::Mod_Shift ? focus_previous_element() : focus_next_element();
         }
     }
 

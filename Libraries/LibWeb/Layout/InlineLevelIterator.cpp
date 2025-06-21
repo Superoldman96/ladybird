@@ -155,7 +155,7 @@ CSSPixels InlineLevelIterator::next_non_whitespace_sequence_width()
         auto& next_item = m_lookahead_items.tail();
         if (next_item.type == InlineLevelIterator::Item::Type::ForcedBreak)
             break;
-        if (next_item.node->computed_values().white_space() != CSS::WhiteSpace::Nowrap) {
+        if (next_item.node->computed_values().text_wrap_mode() == CSS::TextWrapMode::Wrap) {
             if (next_item.type != InlineLevelIterator::Item::Type::Text)
                 break;
             if (next_item.is_collapsible_whitespace)
@@ -452,7 +452,7 @@ Gfx::ShapeFeatures InlineLevelIterator::create_and_merge_font_features() const
     shape_features.ensure_capacity(merged_features.size());
 
     for (auto& it : merged_features) {
-        shape_features.append({ { it.key[0], it.key[1], it.key[2], it.key[3] }, static_cast<u32>(it.value) });
+        shape_features.unchecked_append({ { it.key[0], it.key[1], it.key[2], it.key[3] }, static_cast<u32>(it.value) });
     }
 
     return shape_features;
@@ -620,7 +620,6 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
     auto& box_state = m_layout_state.get(box);
     m_inline_formatting_context.dimension_box_on_line(box, m_layout_mode);
 
-    skip_to_next();
     auto item = Item {
         .type = Item::Type::Element,
         .node = &box,
@@ -635,32 +634,18 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::next_without_lookahead(
         .margin_end = box_state.margin_right,
     };
     add_extra_box_model_metrics_to_item(item, true, true);
+    skip_to_next();
     return item;
 }
 
 void InlineLevelIterator::enter_text_node(Layout::TextNode const& text_node)
 {
-    bool do_collapse = true;
-    bool do_wrap_lines = true;
-    bool do_respect_linebreaks = false;
+    auto white_space_collapse = text_node.computed_values().white_space_collapse();
+    auto text_wrap_mode = text_node.computed_values().text_wrap_mode();
 
-    if (text_node.computed_values().white_space() == CSS::WhiteSpace::Nowrap) {
-        do_collapse = true;
-        do_wrap_lines = false;
-        do_respect_linebreaks = false;
-    } else if (text_node.computed_values().white_space() == CSS::WhiteSpace::Pre) {
-        do_collapse = false;
-        do_wrap_lines = false;
-        do_respect_linebreaks = true;
-    } else if (text_node.computed_values().white_space() == CSS::WhiteSpace::PreLine) {
-        do_collapse = true;
-        do_wrap_lines = true;
-        do_respect_linebreaks = true;
-    } else if (text_node.computed_values().white_space() == CSS::WhiteSpace::PreWrap) {
-        do_collapse = false;
-        do_wrap_lines = true;
-        do_respect_linebreaks = true;
-    }
+    bool do_collapse = white_space_collapse == CSS::WhiteSpaceCollapse::Collapse || white_space_collapse == CSS::WhiteSpaceCollapse::PreserveBreaks;
+    bool do_wrap_lines = text_wrap_mode == CSS::TextWrapMode::Wrap;
+    bool do_respect_linebreaks = white_space_collapse == CSS::WhiteSpaceCollapse::Preserve || white_space_collapse == CSS::WhiteSpaceCollapse::PreserveBreaks || white_space_collapse == CSS::WhiteSpaceCollapse::BreakSpaces;
 
     if (text_node.dom_node().is_editable() && !text_node.dom_node().is_uninteresting_whitespace_node())
         do_collapse = false;

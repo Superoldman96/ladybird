@@ -326,18 +326,7 @@ void TextNode::compute_text_for_rendering()
         return;
     }
 
-    bool collapse = [](CSS::WhiteSpace white_space) {
-        switch (white_space) {
-        case CSS::WhiteSpace::Normal:
-        case CSS::WhiteSpace::Nowrap:
-        case CSS::WhiteSpace::PreLine:
-            return true;
-        case CSS::WhiteSpace::Pre:
-        case CSS::WhiteSpace::PreWrap:
-            return false;
-        }
-        VERIFY_NOT_REACHED();
-    }(computed_values().white_space());
+    bool collapse = first_is_one_of(computed_values().white_space_collapse(), CSS::WhiteSpaceCollapse::Collapse, CSS::WhiteSpaceCollapse::PreserveBreaks);
 
     auto parent_element = dom_node().parent_element();
     auto const maybe_lang = parent_element ? parent_element->lang() : Optional<String> {};
@@ -550,8 +539,7 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::next_without_peek()
             }
         }
 
-        m_current_index
-            = next_grapheme_boundary();
+        m_current_index = next_grapheme_boundary();
     }
 
     if (start_of_chunk != m_utf8_view.byte_length()) {

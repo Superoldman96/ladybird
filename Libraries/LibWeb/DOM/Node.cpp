@@ -575,17 +575,6 @@ String Node::child_text_content() const
     return MUST(builder.to_string());
 }
 
-// https://dom.spec.whatwg.org/#concept-tree-root
-Node& Node::root()
-{
-    // The root of an object is itself, if its parent is null, or else it is the root of its parent.
-    // The root of a tree is any object participating in that tree whose parent is null.
-    Node* root = this;
-    while (root->parent())
-        root = root->parent();
-    return *root;
-}
-
 // https://dom.spec.whatwg.org/#concept-shadow-including-root
 Node& Node::shadow_including_root()
 {
@@ -597,6 +586,29 @@ Node& Node::shadow_including_root()
             return host->shadow_including_root();
     }
     return node_root;
+}
+
+// https://dom.spec.whatwg.org/#concept-closed-shadow-hidden
+bool Node::is_closed_shadow_hidden_from(Node const& b) const
+{
+    // A node A is closed-shadow-hidden from a node B if all of the following conditions are true:
+    auto const& a_root = root();
+
+    // - A’s root is a shadow root.
+    if (!a_root.is_shadow_root())
+        return false;
+
+    // - A’s root is not a shadow-including inclusive ancestor of B.
+    if (a_root.is_shadow_including_inclusive_ancestor_of(b))
+        return false;
+
+    // - A’s root is a shadow root whose mode is "closed" or A’s root’s host is closed-shadow-hidden from B.
+    if (a_root.is_shadow_root() && static_cast<ShadowRoot const&>(a_root).mode() == Bindings::ShadowRootMode::Closed)
+        return true;
+    if (a_root.is_document_fragment() && static_cast<DocumentFragment const&>(a_root).host()->is_closed_shadow_hidden_from(b))
+        return true;
+
+    return false;
 }
 
 // https://dom.spec.whatwg.org/#connected
@@ -816,6 +828,16 @@ void Node::insert_before(GC::Ref<Node> node, GC::Ptr<Node> child, bool suppress_
         set_needs_layout_tree_update(true, SetNeedsLayoutTreeUpdateReason::NodeInsertBefore);
     }
 
+    // AD-HOC: invalidate the ordinal of the first list_item of the list_owner of the child node, if any.
+    if (child && child->is_element())
+        static_cast<Element*>(child.ptr())->maybe_invalidate_ordinals_for_list_owner();
+    else if (this->is_element() && !this->is_html_ol_ul_menu_element())
+        static_cast<Element*>(this)->maybe_invalidate_ordinals_for_list_owner();
+    // NOTE: If the child node is null and the parent node is an ol, ul or menu element then:
+    //       the new node will be the first in the list of a potential list owner and it will not have
+    //       an ordinal value (default from constructor).
+    // FIXME: This will not work if the child or the parent is not an element. Is insert_before even possible in this situation?
+
     document().bump_dom_tree_version();
 }
 
@@ -865,6 +887,11 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Node::append_child(GC::Ref<Node> node)
 {
     // To append a node to a parent, pre-insert node into parent before null.
     return pre_insert(node, nullptr);
+
+    // AD-HOC: invalidate the ordinal of the first list_item of the first child sibling of the appended node, if any.
+    // NOTE: This works since ordinal values are accessed (for layout and paint) in the preorder of list_item nodes !!
+    if (auto* first_child_element = this->first_child_of_type<Element>())
+        first_child_element->maybe_invalidate_ordinals_for_list_owner();
 }
 
 // https://dom.spec.whatwg.org/#live-range-pre-remove-steps
@@ -927,6 +954,12 @@ void Node::remove(bool suppress_observers)
 
     // 6. Let oldNextSibling be node’s next sibling.
     GC::Ptr<Node> old_next_sibling = next_sibling();
+
+    // AD-HOC: invalidate the ordinal of the first list_item of the list_owner of the removed node, if any.
+    if (is_element()) {
+        auto* this_element = static_cast<Element*>(this);
+        this_element->maybe_invalidate_ordinals_for_list_owner(this_element);
+    }
 
     if (is_connected()) {
         // Since the tree structure is about to change, we need to invalidate both style and layout.
@@ -1634,8 +1667,19 @@ void Node::set_needs_layout_tree_update(bool value, SetNeedsLayoutTreeUpdateReas
                 break;
             ancestor->m_child_needs_layout_tree_update = true;
         }
-        if (auto layout_node = this->layout_node())
+        if (auto layout_node = this->layout_node()) {
             layout_node->set_needs_layout_update(SetNeedsLayoutReason::LayoutTreeUpdate);
+
+            // If the layout node has an anonymous parent, rebuild from the nearest non-anonymous ancestor.
+            // FIXME: This is not optimal, and we should figure out how to rebuild a smaller part of the tree.
+            if (layout_node->parent() && layout_node->parent()->is_anonymous()) {
+                GC::Ptr<Layout::Node> ancestor = layout_node->parent();
+                while (ancestor && ancestor->is_anonymous())
+                    ancestor = ancestor->parent();
+                if (ancestor)
+                    ancestor->dom_node()->set_needs_layout_tree_update(true, reason);
+            }
+        }
     }
 }
 
@@ -1964,13 +2008,6 @@ bool Node::is_scripting_disabled() const
 {
     // Scripting is disabled for a node when scripting is not enabled, i.e., when its node document's browsing context is null or when scripting is disabled for its relevant realm.
     return !is_scripting_enabled();
-}
-
-// https://dom.spec.whatwg.org/#dom-node-contains
-bool Node::contains(GC::Ptr<Node> other) const
-{
-    // The contains(other) method steps are to return true if other is an inclusive descendant of this; otherwise false (including when other is null).
-    return other && other->is_inclusive_descendant_of(*this);
 }
 
 // https://dom.spec.whatwg.org/#concept-shadow-including-descendant
@@ -2575,28 +2612,6 @@ void Node::insert_before_impl(GC::Ref<Node> node, GC::Ptr<Node> child)
 void Node::remove_child_impl(GC::Ref<Node> node)
 {
     TreeNode::remove_child(node);
-}
-
-bool Node::is_descendant_of(Node const& other) const
-{
-    return other.is_ancestor_of(*this);
-}
-
-bool Node::is_inclusive_descendant_of(Node const& other) const
-{
-    return other.is_inclusive_ancestor_of(*this);
-}
-
-// https://dom.spec.whatwg.org/#concept-tree-following
-bool Node::is_following(Node const& other) const
-{
-    // An object A is following an object B if A and B are in the same tree and A comes after B in tree order.
-    for (auto* node = previous_in_pre_order(); node; node = node->previous_in_pre_order()) {
-        if (node == &other)
-            return true;
-    }
-
-    return false;
 }
 
 void Node::build_accessibility_tree(AccessibilityTreeNode& parent)

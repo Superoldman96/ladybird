@@ -193,6 +193,7 @@ set(SOURCES
     CSS/StyleValues/PositionStyleValue.cpp
     CSS/StyleValues/RadialGradientStyleValue.cpp
     CSS/StyleValues/RectStyleValue.cpp
+    CSS/StyleValues/ScrollbarColorStyleValue.cpp
     CSS/StyleValues/ShadowStyleValue.cpp
     CSS/StyleValues/ShorthandStyleValue.cpp
     CSS/StyleValues/StyleValueList.cpp
@@ -210,6 +211,7 @@ set(SOURCES
     CSS/VisualViewport.cpp
     DOM/AbortController.cpp
     DOM/AbortSignal.cpp
+    DOM/AbstractElement.cpp
     DOM/AbstractRange.cpp
     DOM/AccessibilityTreeNode.cpp
     DOM/AdoptedStyleSheets.cpp
@@ -249,6 +251,7 @@ set(SOURCES
     DOM/ParentNode.cpp
     DOM/Position.cpp
     DOM/ProcessingInstruction.cpp
+    DOM/PseudoElement.cpp
     DOM/QualifiedName.cpp
     DOM/Range.cpp
     DOM/ShadowRoot.cpp
@@ -313,6 +316,10 @@ set(SOURCES
     FileAPI/FileList.cpp
     FileAPI/FileReader.cpp
     FileAPI/FileReaderSync.cpp
+    Geolocation/Geolocation.cpp
+    Geolocation/GeolocationCoordinates.cpp
+    Geolocation/GeolocationPosition.cpp
+    Geolocation/GeolocationPositionError.cpp
     Geometry/DOMMatrix.cpp
     Geometry/DOMMatrixReadOnly.cpp
     Geometry/DOMPoint.cpp
@@ -542,6 +549,7 @@ set(SOURCES
     HTML/TextTrackCue.cpp
     HTML/TextTrackCueList.cpp
     HTML/TextTrackList.cpp
+    HTML/TextTrackObserver.cpp
     HTML/Timer.cpp
     HTML/TimeRanges.cpp
     HTML/ToggleEvent.cpp
@@ -737,6 +745,7 @@ set(SOURCES
     ResourceTiming/PerformanceResourceTiming.cpp
     SecureContexts/AbstractOperations.cpp
     Selection/Selection.cpp
+    ServiceWorker/CacheStorage.cpp
     ServiceWorker/EventNames.cpp
     ServiceWorker/Job.cpp
     ServiceWorker/Registration.cpp
@@ -1009,6 +1018,8 @@ target_link_libraries(LibWeb PRIVATE LibCore LibCompress LibCrypto LibJS LibHTTP
 
 if (APPLE)
     target_link_libraries(LibWeb PRIVATE unofficial::angle::libEGL unofficial::angle::libGLESv2)
+else()
+    target_link_libraries(LibWeb PRIVATE GL)
 endif()
 
 # FIXME: https://github.com/microsoft/vcpkg/issues/42324

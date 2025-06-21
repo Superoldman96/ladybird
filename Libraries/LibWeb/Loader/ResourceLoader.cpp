@@ -6,7 +6,6 @@
  */
 
 #include <AK/Debug.h>
-#include <LibCore/DateTime.h>
 #include <LibCore/Directory.h>
 #include <LibCore/MimeData.h>
 #include <LibCore/Resource.h>
@@ -146,8 +145,8 @@ static HTTP::HeaderMap response_headers_for_file(StringView path, Optional<time_
     response_headers.set("Content-Type"sv, mime_type);
 
     if (modified_time.has_value()) {
-        auto const datetime = Core::DateTime::from_timestamp(modified_time.value());
-        response_headers.set("Last-Modified"sv, datetime.to_byte_string("%a, %d %b %Y %H:%M:%S GMT"sv, Core::DateTime::LocalTime::No));
+        auto const datetime = AK::UnixDateTime::from_seconds_since_epoch(modified_time.value());
+        response_headers.set("Last-Modified"sv, datetime.to_byte_string("%a, %d %b %Y %H:%M:%S GMT"sv));
     }
 
     return response_headers;
@@ -443,8 +442,12 @@ void ResourceLoader::load(LoadRequest& request, GC::Root<SuccessCallback> succes
                 else
                     error_builder.append("Load failed"sv);
 
-                if (status_code.has_value() && *status_code > 0)
-                    error_builder.appendff(" (status: {} {})", *status_code, HTTP::HttpResponse::reason_phrase_for_code(*status_code));
+                if (status_code.has_value()) {
+                    if (*status_code >= 100 && *status_code <= 599)
+                        error_builder.appendff(" (status: {} {})", *status_code, HTTP::HttpResponse::reason_phrase_for_code(*status_code));
+                    else
+                        error_builder.appendff(" (status: {})", *status_code);
+                }
 
                 log_failure(request, error_builder.string_view());
                 if (error_callback)

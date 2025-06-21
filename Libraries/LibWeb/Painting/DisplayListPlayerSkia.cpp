@@ -784,8 +784,8 @@ void DisplayListPlayerSkia::apply_backdrop_filter(ApplyBackdropFilter const& com
     canvas.clipRect(rect);
     ScopeGuard guard = [&] { canvas.restore(); };
 
-    for (auto const& filter : command.backdrop_filter) {
-        auto image_filter = to_skia_image_filter(filter);
+    if (command.backdrop_filter.has_value()) {
+        auto image_filter = to_skia_image_filter(command.backdrop_filter.value());
         canvas.saveLayer(SkCanvas::SaveLayerRec(nullptr, nullptr, image_filter.get(), 0));
         canvas.restore();
     }
@@ -1001,17 +1001,20 @@ void DisplayListPlayerSkia::paint_scrollbar(PaintScrollBar const& command)
 
     auto& canvas = surface().canvas();
 
-    auto gutter_fill_color = Color(Color::NamedColor::WarmGray).with_alpha(192);
+    auto gutter_fill_color = command.track_color;
     SkPaint gutter_fill_paint;
     gutter_fill_paint.setColor(to_skia_color(gutter_fill_color));
     canvas.drawRect(gutter_rect, gutter_fill_paint);
 
-    auto thumb_fill_color = Color(Color::NamedColor::DarkGray).with_alpha(gutter_rect.isEmpty() ? 128 : 192);
+    auto thumb_fill_color = command.thumb_color;
+    if (command.gutter_rect.is_empty() && thumb_fill_color == CSS::InitialValues::scrollbar_color().thumb_color)
+        thumb_fill_color = thumb_fill_color.with_alpha(128);
+
     SkPaint thumb_fill_paint;
     thumb_fill_paint.setColor(to_skia_color(thumb_fill_color));
     canvas.drawRRect(thumb_rrect, thumb_fill_paint);
 
-    auto stroke_color = Color(Color::NamedColor::LightGray).with_alpha(128);
+    auto stroke_color = thumb_fill_color.lightened();
     SkPaint stroke_paint;
     stroke_paint.setStroke(true);
     stroke_paint.setStrokeWidth(1);
@@ -1036,23 +1039,9 @@ void DisplayListPlayerSkia::apply_composite_and_blending_operator(ApplyComposite
     canvas.saveLayer(nullptr, &paint);
 }
 
-void DisplayListPlayerSkia::apply_filters(ApplyFilters const& command)
+void DisplayListPlayerSkia::apply_filters(ApplyFilter const& command)
 {
-    if (command.filter.is_empty()) {
-        return;
-    }
-    sk_sp<SkImageFilter> image_filter;
-    auto append_filter = [&image_filter](auto new_filter) {
-        if (image_filter)
-            image_filter = SkImageFilters::Compose(new_filter, image_filter);
-        else
-            image_filter = new_filter;
-    };
-
-    // Apply filters in order
-    for (auto filter : command.filter) {
-        append_filter(to_skia_image_filter(filter));
-    }
+    sk_sp<SkImageFilter> image_filter = to_skia_image_filter(command.filter);
 
     SkPaint paint;
     paint.setImageFilter(image_filter);

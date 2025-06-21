@@ -56,12 +56,12 @@ URL::Origin determine_the_origin(Optional<URL::URL const&> url, SandboxingFlagSe
 {
     // 1. If sandboxFlags has its sandboxed origin browsing context flag set, then return a new opaque origin.
     if (has_flag(sandbox_flags, SandboxingFlagSet::SandboxedOrigin)) {
-        return URL::Origin {};
+        return URL::Origin::create_opaque();
     }
 
     // 2. If url is null, then return a new opaque origin.
     if (!url.has_value()) {
-        return URL::Origin {};
+        return URL::Origin::create_opaque();
     }
 
     // 3. If url is about:srcdoc, then:
@@ -254,7 +254,7 @@ WebIDL::ExceptionOr<BrowsingContext::BrowsingContextAndDocument> BrowsingContext
         document->set_policy_container(creator->policy_container()->clone(document->heap()));
 
         // 3. If creator's origin is same origin with creator's relevant settings object's top-level origin,
-        if (creator->origin().is_same_origin(creator->relevant_settings_object().top_level_origin)) {
+        if (creator->origin().is_same_origin(creator->relevant_settings_object().top_level_origin.value())) {
             // then set document's opener policy to creator's browsing context's top-level browsing context's active document's opener policy.
             VERIFY(creator->browsing_context());
             VERIFY(creator->browsing_context()->top_level_browsing_context()->active_document());

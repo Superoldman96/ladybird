@@ -201,9 +201,21 @@ SerializedPolicy Policy::serialize() const
         .directives = move(serialized_directives),
         .disposition = m_disposition,
         .source = m_source,
-        .self_origin = m_self_origin,
+        .self_origin = m_self_origin.value(),
         .pre_parsed_policy_string = m_pre_parsed_policy_string,
     };
+}
+
+void Policy::remove_directive(Badge<HTML::HTMLMetaElement>, FlyString const& name)
+{
+    m_directives.remove_all_matching([&name](auto const& directive) {
+        return directive->name() == name;
+    });
+}
+
+void Policy::set_self_origin(Badge<HTML::HTMLMetaElement>, URL::Origin const& origin)
+{
+    m_self_origin = origin;
 }
 
 void Policy::visit_edges(Cell::Visitor& visitor)

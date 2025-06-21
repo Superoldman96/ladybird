@@ -185,6 +185,7 @@ class ConicGradientStyleValue;
 class ContentStyleValue;
 class CounterDefinitionsStyleValue;
 class CounterStyleValue;
+class CountersSet;
 class CSSAnimation;
 class CSSColorValue;
 class CSSConditionRule;
@@ -239,7 +240,6 @@ class FrequencyOrCalculated;
 class FrequencyPercentage;
 class FrequencyStyleValue;
 class GridAutoFlowStyleValue;
-class GridFitContent;
 class GridMinMax;
 class GridRepeat;
 class GridSize;
@@ -288,6 +288,7 @@ class Selector;
 class ShadowStyleValue;
 class ShorthandStyleValue;
 class Size;
+class ScrollbarColorStyleValue;
 class StringStyleValue;
 class StyleComputer;
 class ComputedProperties;
@@ -315,6 +316,8 @@ enum class PropertyID : u16;
 
 struct BackgroundLayerData;
 struct CSSStyleSheetInit;
+struct GridLineNames;
+struct GridRepeatParams;
 struct StyleSheetIdentifier;
 
 }
@@ -338,6 +341,7 @@ namespace Web::DOM {
 
 class AbortController;
 class AbortSignal;
+class AbstractElement;
 class AbstractRange;
 class AccessibilityTreeNode;
 class Attr;
@@ -372,6 +376,7 @@ class NodeList;
 class ParentNode;
 class Position;
 class ProcessingInstruction;
+class PseudoElement;
 class Range;
 class RegisteredObserver;
 class ShadowRoot;
@@ -453,6 +458,15 @@ namespace Web::FileAPI {
 class Blob;
 class File;
 class FileList;
+
+}
+
+namespace Web::Geolocation {
+
+class Geolocation;
+class GeolocationCoordinates;
+class GeolocationPosition;
+class GeolocationPositionError;
 
 }
 
@@ -625,6 +639,7 @@ class TextTrack;
 class TextTrackCue;
 class TextTrackCueList;
 class TextTrackList;
+class TextTrackObserver;
 class Timer;
 class TimeRanges;
 class ToggleEvent;
@@ -916,13 +931,13 @@ struct UnderlyingSource;
 namespace Web::StorageAPI {
 
 class NavigatorStorage;
+class StorageBottle;
+class StorageBucket;
 class StorageManager;
 class StorageShed;
+class StorageShelf;
 
-struct StorageBottle;
-struct StorageBucket;
 struct StorageEndpoint;
-struct StorageShelf;
 
 }
 

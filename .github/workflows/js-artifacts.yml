@@ -11,21 +11,23 @@ env:
 
 jobs:
   build-and-package:
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner_labels) }}
     if: github.repository == 'LadybirdBrowser/ladybird'
+    name: ${{ matrix.os_name }}, ${{ matrix.arch }}
+
     strategy:
       fail-fast: false
       matrix:
         os_name: ['Linux']
-        os: ['ubuntu-24.04']
         arch: ['x86_64']
         package_type: ['Linux-x86_64']
+        runner_labels: ['["blacksmith-8vcpu-ubuntu-2404"]']
 
         include:
           - os_name: 'macOS'
-            os: 'macos-15'
             arch: 'arm64'
-            package_type: 'macOS-universal2'
+            package_type: 'macOS-arm64'
+            runner_labels: '["macos-15", "self-hosted"]'
 
     steps:
       - name: Checkout LadybirdBrowser/ladybird
@@ -41,6 +43,7 @@ jobs:
         uses: ./.github/actions/cache-restore
         id: 'cache-restore'
         with:
+          runner_labels: ${{ matrix.runner_labels }}
           os: ${{ matrix.os_name }}
           arch: ${{ matrix.arch }}
           cache_key_extra: 'LibJS Artifacts'
@@ -76,6 +79,7 @@ jobs:
       - name: Save Caches
         uses: ./.github/actions/cache-save
         with:
+          runner_labels: ${{ matrix.runner_labels }}
           arch: 'Lagom'
           ccache_path: ${{ env.CCACHE_DIR }}
           ccache_primary_key: ${{ steps.cache-restore.outputs.ccache_primary_key }}

@@ -196,7 +196,7 @@ GC::Ptr<CSSImportRule> Parser::convert_to_import_rule(AtRule const& rule)
         return {};
     }
 
-    if (!rule.child_rules_and_lists_of_declarations.is_empty()) {
+    if (rule.is_block_rule) {
         dbgln_if(CSS_PARSER_DEBUG, "Failed to parse @import rule: Block is not allowed.");
         return {};
     }
@@ -288,7 +288,7 @@ Optional<FlyString> Parser::parse_layer_name(TokenStream<ComponentValue>& tokens
 GC::Ptr<CSSRule> Parser::convert_to_layer_rule(AtRule const& rule, Nested nested)
 {
     // https://drafts.csswg.org/css-cascade-5/#at-layer
-    if (!rule.child_rules_and_lists_of_declarations.is_empty()) {
+    if (rule.is_block_rule) {
         // CSSLayerBlockRule
         // @layer <layer-name>? {
         //   <rule-list>
@@ -389,7 +389,7 @@ GC::Ptr<CSSKeyframesRule> Parser::convert_to_keyframes_rule(AtRule const& rule)
         return {};
     }
 
-    if (name_token.is(Token::Type::Ident) && (is_css_wide_keyword(name_token.ident()) || name_token.ident().equals_ignoring_ascii_case("none"sv))) {
+    if (name_token.is(Token::Type::Ident) && (is_css_wide_keyword(name_token.ident()) || name_token.ident().is_one_of_ignoring_ascii_case("none"sv, "default"sv))) {
         dbgln_if(CSS_PARSER_DEBUG, "CSSParser: @keyframes rule name is invalid: {}; discarding.", name_token.ident());
         return {};
     }
@@ -470,7 +470,7 @@ GC::Ptr<CSSNamespaceRule> Parser::convert_to_namespace_rule(AtRule const& rule)
         return {};
     }
 
-    if (!rule.child_rules_and_lists_of_declarations.is_empty()) {
+    if (rule.is_block_rule) {
         dbgln_if(CSS_PARSER_DEBUG, "Failed to parse @namespace rule: Block is not allowed.");
         return {};
     }

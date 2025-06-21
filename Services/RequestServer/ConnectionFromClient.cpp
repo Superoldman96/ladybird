@@ -39,6 +39,7 @@ static struct {
     Optional<ByteString> server_hostname;
     u16 port;
     bool use_dns_over_tls = true;
+    bool validate_dnssec_locally = false;
 } g_dns_info;
 
 static WeakPtr<Resolver> s_resolver {};
@@ -99,12 +100,11 @@ ByteString build_curl_resolve_list(DNS::LookupResult const& dns_result, StringVi
     return resolve_opt_builder.to_byte_string();
 }
 
-struct ConnectionFromClient::ActiveRequest {
+struct ConnectionFromClient::ActiveRequest : public Weakable<ActiveRequest> {
     CURLM* multi { nullptr };
     CURL* easy { nullptr };
     Vector<curl_slist*> curl_string_lists;
     i32 request_id { 0 };
-    RefPtr<Core::Notifier> notifier;
     WeakPtr<ConnectionFromClient> client;
     int writer_fd { 0 };
     HTTP::HeaderMap headers;
@@ -114,6 +114,9 @@ struct ConnectionFromClient::ActiveRequest {
     String url;
     Optional<String> reason_phrase;
     ByteBuffer body;
+    AllocatingMemoryStream send_buffer;
+    NonnullRefPtr<Core::Notifier> write_notifier;
+    bool done_fetching { false };
 
     ActiveRequest(ConnectionFromClient& client, CURLM* multi, CURL* easy, i32 request_id, int writer_fd)
         : multi(multi)
@@ -121,11 +124,61 @@ struct ConnectionFromClient::ActiveRequest {
         , request_id(request_id)
         , client(client)
         , writer_fd(writer_fd)
+        , write_notifier(Core::Notifier::construct(writer_fd, Core::NotificationType::Write))
     {
+        write_notifier->set_enabled(false);
+        write_notifier->on_activation = [this] {
+            if (auto maybe_error = write_queued_bytes_without_blocking(); maybe_error.is_error()) {
+                dbgln("Warning: Failed to write buffered request data (it's likely the client disappeared): {}", maybe_error.error());
+            }
+        };
+    }
+
+    void schedule_self_destruction() const
+    {
+        Core::deferred_invoke([weak_this = make_weak_ptr()] {
+            if (!weak_this)
+                return;
+            if (weak_this->client)
+                weak_this->client->m_active_requests.remove(weak_this->request_id);
+        });
+    }
+
+    ErrorOr<void> write_queued_bytes_without_blocking()
+    {
+        Vector<u8> bytes_to_send;
+        bytes_to_send.resize(send_buffer.used_buffer_size());
+        send_buffer.peek_some(bytes_to_send);
+        auto result = Core::System::write(this->writer_fd, bytes_to_send);
+        if (result.is_error()) {
+            if (result.error().code() != EAGAIN) {
+                return result.release_error();
+            }
+            write_notifier->set_enabled(true);
+            return {};
+        }
+
+        MUST(send_buffer.discard(result.value()));
+        write_notifier->set_enabled(!send_buffer.is_eof());
+        if (send_buffer.is_eof() && done_fetching)
+            schedule_self_destruction();
+
+        return {};
+    }
+
+    void notify_about_fetching_completion()
+    {
+        done_fetching = true;
+        if (send_buffer.is_eof())
+            schedule_self_destruction();
     }
 
     ~ActiveRequest()
     {
+        if (!send_buffer.is_eof()) {
+            dbgln("Warning: Request destroyed with buffered data (it's likely that the client disappeared or the request was cancelled)");
+        }
+
         if (writer_fd > 0)
             MUST(Core::System::close(writer_fd));
 
@@ -187,30 +240,19 @@ size_t ConnectionFromClient::on_data_received(void* buffer, size_t size, size_t 
     request->flush_headers_if_needed();
 
     size_t total_size = size * nmemb;
+    ReadonlyBytes bytes { static_cast<u8 const*>(buffer), total_size };
 
-    size_t remaining_length = total_size;
-    u8 const* remaining_data = static_cast<u8 const*>(buffer);
-    while (remaining_length > 0) {
-        auto result = Core::System::write(request->writer_fd, { remaining_data, remaining_length });
-        if (result.is_error()) {
-            if (result.error().code() != EAGAIN) {
-                dbgln("on_data_received: write failed: {}", result.error());
-                VERIFY_NOT_REACHED();
-            }
-            sched_yield();
-            continue;
-        }
-        auto nwritten = result.value();
-        if (nwritten == 0) {
-            dbgln("on_data_received: write returned 0");
-            VERIFY_NOT_REACHED();
-        }
-        remaining_data += nwritten;
-        remaining_length -= nwritten;
+    auto maybe_write_error = [&] -> ErrorOr<void> {
+        TRY(request->send_buffer.write_some(bytes));
+        return request->write_queued_bytes_without_blocking();
+    }();
+
+    if (maybe_write_error.is_error()) {
+        dbgln("ConnectionFromClient::on_data_received: Aborting request because error occurred whilst writing data to the client: {}", maybe_write_error.error());
+        return CURL_WRITEFUNC_ERROR;
     }
 
     request->downloaded_so_far += total_size;
-
     return total_size;
 }
 
@@ -349,9 +391,9 @@ Messages::RequestServer::IsSupportedProtocolResponse ConnectionFromClient::is_su
     return protocol == "http"sv || protocol == "https"sv;
 }
 
-void ConnectionFromClient::set_dns_server(ByteString host_or_address, u16 port, bool use_tls)
+void ConnectionFromClient::set_dns_server(ByteString host_or_address, u16 port, bool use_tls, bool validate_dnssec_locally)
 {
-    if (host_or_address == g_dns_info.server_hostname && port == g_dns_info.port && use_tls == g_dns_info.use_dns_over_tls)
+    if (host_or_address == g_dns_info.server_hostname && port == g_dns_info.port && use_tls == g_dns_info.use_dns_over_tls && validate_dnssec_locally == g_dns_info.validate_dnssec_locally)
         return;
 
     auto result = [&] -> ErrorOr<void> {
@@ -367,6 +409,7 @@ void ConnectionFromClient::set_dns_server(ByteString host_or_address, u16 port, 
         g_dns_info.server_hostname = host_or_address;
         g_dns_info.port = port;
         g_dns_info.use_dns_over_tls = use_tls;
+        g_dns_info.validate_dnssec_locally = validate_dnssec_locally;
         return {};
     }();
 
@@ -393,7 +436,7 @@ void ConnectionFromClient::start_request(i32 request_id, ByteString method, URL:
 {
     auto host = url.serialized_host().to_byte_string();
 
-    m_resolver->dns.lookup(host, DNS::Messages::Class::IN, { DNS::Messages::ResourceType::A, DNS::Messages::ResourceType::AAAA })
+    m_resolver->dns.lookup(host, DNS::Messages::Class::IN, { DNS::Messages::ResourceType::A, DNS::Messages::ResourceType::AAAA }, { .validate_dnssec_locally = g_dns_info.validate_dnssec_locally })
         ->when_rejected([this, request_id](auto const& error) {
             dbgln("StartRequest: DNS lookup failed: {}", error);
             // FIXME: Implement timing info for DNS lookup failure.
@@ -663,7 +706,7 @@ void ConnectionFromClient::check_active_requests()
             async_request_finished(request->request_id, request->downloaded_so_far, timing_info, network_error);
         }
 
-        m_active_requests.remove(request->request_id);
+        request->notify_about_fetching_completion();
     }
 }
 
@@ -727,7 +770,7 @@ void ConnectionFromClient::ensure_connection(URL::URL url, ::RequestServer::Cach
     }
 
     if (cache_level == CacheLevel::ResolveOnly) {
-        [[maybe_unused]] auto promise = m_resolver->dns.lookup(url.serialized_host().to_byte_string(), DNS::Messages::Class::IN, { DNS::Messages::ResourceType::A, DNS::Messages::ResourceType::AAAA });
+        [[maybe_unused]] auto promise = m_resolver->dns.lookup(url.serialized_host().to_byte_string(), DNS::Messages::Class::IN, { DNS::Messages::ResourceType::A, DNS::Messages::ResourceType::AAAA }, { .validate_dnssec_locally = g_dns_info.validate_dnssec_locally });
         if constexpr (REQUESTSERVER_DEBUG) {
             Core::ElapsedTimer timer;
             timer.start();

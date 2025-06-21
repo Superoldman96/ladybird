@@ -44,6 +44,7 @@ static bool is_platform_object(Type const& type)
         "AudioTrack"sv,
         "BaseAudioContext"sv,
         "Blob"sv,
+        "CacheStorage"sv,
         "CanvasGradient"sv,
         "CanvasPattern"sv,
         "CanvasRenderingContext2D"sv,
@@ -3160,7 +3161,10 @@ static void collect_attribute_values_of_an_inheritance_stack(SourceGenerator& fu
 )~~~");
             }
 
-            generate_wrap_statement(attribute_generator, return_value_name, attribute.type, interface_in_chain, ByteString::formatted("auto {}_wrapped =", return_value_name));
+            attribute_generator.append(R"~~~(
+    JS::Value @attribute.return_value_name@_wrapped;
+)~~~");
+            generate_wrap_statement(attribute_generator, return_value_name, attribute.type, interface_in_chain, ByteString::formatted("{}_wrapped =", return_value_name));
 
             attribute_generator.append(R"~~~(
     MUST(result->create_data_property("@attribute.name@"_fly_string, @attribute.return_value_name@_wrapped));
@@ -4720,6 +4724,7 @@ using namespace Web::EntriesAPI;
 using namespace Web::EventTiming;
 using namespace Web::Fetch;
 using namespace Web::FileAPI;
+using namespace Web::Geolocation;
 using namespace Web::Geometry;
 using namespace Web::HighResolutionTime;
 using namespace Web::HTML;

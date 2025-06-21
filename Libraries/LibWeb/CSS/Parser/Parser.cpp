@@ -291,7 +291,7 @@ OwnPtr<BooleanExpression> Parser::parse_supports_feature(TokenStream<ComponentVa
     if (first_token.is_block() && first_token.block().is_paren()) {
         TokenStream block_tokens { first_token.block().value };
         // FIXME: Parsing and then converting back to a string is weird.
-        if (auto declaration = consume_a_declaration(block_tokens); declaration.has_value()) {
+        if (auto declaration = consume_a_declaration(block_tokens); declaration.has_value() && !block_tokens.has_next_token()) {
             transaction.commit();
             auto supports_declaration = Supports::Declaration::create(
                 declaration->to_string(),
@@ -441,6 +441,7 @@ Optional<AtRule> Parser::consume_an_at_rule(TokenStream<T>& input, Nested nested
         .name = ((Token)input.consume_a_token()).at_keyword(),
         .prelude = {},
         .child_rules_and_lists_of_declarations = {},
+        .is_block_rule = false,
     };
 
     // Process input:
@@ -479,6 +480,7 @@ Optional<AtRule> Parser::consume_an_at_rule(TokenStream<T>& input, Nested nested
             // Consume a block from input, and assign the result to rule’s child rules.
             m_rule_context.append(rule_context_type_for_at_rule(rule.name));
             rule.child_rules_and_lists_of_declarations = consume_a_block(input);
+            rule.is_block_rule = true;
             m_rule_context.take_last();
 
             // If rule is valid in the current context, return it. Otherwise, return nothing.
@@ -1782,6 +1784,8 @@ bool Parser::has_ignored_vendor_prefix(StringView string)
     if (string.starts_with("--"sv))
         return false;
     if (string.starts_with("-libweb-"sv))
+        return false;
+    if (string.count('-') == 1)
         return false;
     return true;
 }

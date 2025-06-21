@@ -35,7 +35,7 @@ ThrowCompletionOr<GC::Ref<Array>> Array::create(Realm& realm, u64 length, Object
     // 3. Let A be MakeBasicObject(« [[Prototype]], [[Extensible]] »).
     // 4. Set A.[[Prototype]] to proto.
     // 5. Set A.[[DefineOwnProperty]] as specified in 10.4.2.1.
-    auto array = realm.create<Array>(*prototype);
+    auto array = realm.create<Array>(realm, *prototype);
 
     // 6. Perform ! OrdinaryDefineOwnProperty(A, "length", PropertyDescriptor { [[Value]]: 𝔽(length), [[Writable]]: true, [[Enumerable]]: false, [[Configurable]]: false }).
     MUST(array->internal_define_own_property(vm.names.length, { .value = Value(length), .writable = true, .enumerable = false, .configurable = false }));
@@ -63,10 +63,17 @@ GC::Ref<Array> Array::create_from(Realm& realm, ReadonlySpan<Value> elements)
     return array;
 }
 
-Array::Array(Object& prototype)
+Array::Array(Realm& realm, Object& prototype)
     : Object(ConstructWithPrototypeTag::Tag, prototype)
+    , m_realm(realm)
 {
     m_has_magical_length_property = true;
+}
+
+void Array::visit_edges(Cell::Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    visitor.visit(m_realm);
 }
 
 // 10.4.2.4 ArraySetLength ( A, Desc ), https://tc39.es/ecma262/#sec-arraysetlength
@@ -269,11 +276,93 @@ ThrowCompletionOr<double> compare_array_elements(VM& vm, Value x, Value y, Funct
 // NON-STANDARD: Used to return the value of the ephemeral length property
 ThrowCompletionOr<Optional<PropertyDescriptor>> Array::internal_get_own_property(PropertyKey const& property_key) const
 {
+    // OPTIMIZATION: Fast path for arrays with simple indexed properties storage.
+    auto const* storage = indexed_properties().storage();
+    if (property_key.is_number() && storage && storage->is_simple_storage()) {
+        auto const& simple_storage = static_cast<SimpleIndexedPropertyStorage const&>(*storage);
+        auto value_and_attributes = simple_storage.get(property_key.as_number());
+        if (value_and_attributes.has_value()) {
+            PropertyDescriptor descriptor;
+            descriptor.value = value_and_attributes->value;
+            descriptor.writable = true;
+            descriptor.enumerable = true;
+            descriptor.configurable = true;
+            return descriptor;
+        }
+        return Optional<PropertyDescriptor> {};
+    }
+
     auto& vm = this->vm();
     if (property_key.is_string() && property_key.as_string() == vm.names.length.as_string())
         return PropertyDescriptor { .value = Value(indexed_properties().array_like_size()), .writable = m_length_writable, .enumerable = false, .configurable = false };
 
     return Object::internal_get_own_property(property_key);
+}
+
+ThrowCompletionOr<bool> Array::internal_set(PropertyKey const& property_key, Value value, Value receiver, CacheablePropertyMetadata* cacheable_metadata, PropertyLookupPhase phase)
+{
+    auto& vm = this->vm();
+
+    auto default_prototype_chain_intact = [&] {
+        auto const& intrinsics = m_realm->intrinsics();
+        auto* array_prototype = shape().prototype();
+        if (!array_prototype)
+            return false;
+        if (!array_prototype->indexed_properties().is_empty())
+            return false;
+        auto& array_prototype_shape = shape().prototype()->shape();
+        if (intrinsics.default_array_prototype_shape().ptr() != &array_prototype_shape)
+            return false;
+
+        auto* object_prototype = array_prototype_shape.prototype();
+        if (!object_prototype)
+            return false;
+        if (!object_prototype->indexed_properties().is_empty())
+            return false;
+        auto& object_prototype_shape = array_prototype_shape.prototype()->shape();
+        if (intrinsics.default_object_prototype_shape().ptr() != &object_prototype_shape)
+            return false;
+        if (object_prototype_shape.prototype())
+            return false;
+
+        return true;
+    };
+
+    VERIFY(receiver.is_object());
+    auto& receiver_object = receiver.as_object();
+
+    // Fast path for arrays with intact prototype chain
+    if (&receiver_object == this && !m_is_proxy_target && default_prototype_chain_intact()) {
+        if (property_key.is_number()) {
+            auto index = property_key.as_number();
+            auto property_descriptor = TRY(internal_get_own_property(property_key));
+            if (!property_descriptor.has_value()) {
+                if (!TRY(is_extensible()))
+                    return false;
+                PropertyAttributes attributes;
+                attributes.set_writable(true);
+                attributes.set_enumerable(true);
+                attributes.set_configurable(true);
+                indexed_properties().put(index, value, attributes);
+                return true;
+            }
+            if (property_descriptor->is_data_descriptor()) {
+                if (property_descriptor->writable.has_value() && !*property_descriptor->writable)
+                    return false;
+                auto attributes = property_descriptor->attributes();
+                indexed_properties().put(index, value, attributes);
+                return true;
+            }
+        } else if (property_key == vm.names.length) {
+            auto property_descriptor = TRY(internal_get_own_property(property_key));
+            if (property_descriptor->writable.has_value() && !*property_descriptor->writable)
+                return false;
+            property_descriptor->value = value;
+            return TRY(set_length(*property_descriptor));
+        }
+    }
+
+    return Object::internal_set(property_key, value, receiver, cacheable_metadata, phase);
 }
 
 // 10.4.2.1 [[DefineOwnProperty]] ( P, Desc ), https://tc39.es/ecma262/#sec-array-exotic-objects-defineownproperty-p-desc
@@ -301,7 +390,21 @@ ThrowCompletionOr<bool> Array::internal_define_own_property(PropertyKey const& p
             return false;
 
         // h. Let succeeded be ! OrdinaryDefineOwnProperty(A, P, Desc).
-        auto succeeded = MUST(Object::internal_define_own_property(property_key, property_descriptor, precomputed_get_own_property));
+        bool succeeded = true;
+        auto* storage = indexed_properties().storage();
+        auto attributes = property_descriptor.attributes();
+        // OPTIMIZATION: Fast path for arrays with simple indexed properties storage.
+        if (property_descriptor.is_data_descriptor() && attributes == default_attributes && storage && storage->is_simple_storage()) {
+            if (!m_is_extensible) {
+                auto existing_descriptor = TRY(internal_get_own_property(property_key));
+                if (!existing_descriptor.has_value())
+                    return false;
+            }
+
+            storage->put(property_key.as_number(), property_descriptor.value.value());
+        } else {
+            succeeded = MUST(Object::internal_define_own_property(property_key, property_descriptor, precomputed_get_own_property));
+        }
 
         // i. If succeeded is false, return false.
         if (!succeeded)
@@ -318,6 +421,19 @@ ThrowCompletionOr<bool> Array::internal_define_own_property(PropertyKey const& p
 
     // 3. Return ? OrdinaryDefineOwnProperty(A, P, Desc).
     return Object::internal_define_own_property(property_key, property_descriptor, precomputed_get_own_property);
+}
+
+// NON-STANDARD: Fast path to quickly check if an indexed property exists in array without holes
+ThrowCompletionOr<bool> Array::internal_has_property(PropertyKey const& property_key) const
+{
+    auto const* storage = indexed_properties().storage();
+    if (property_key.is_number() && !m_is_proxy_target && storage && storage->is_simple_storage()) {
+        auto const& simple_storage = static_cast<SimpleIndexedPropertyStorage const&>(*storage);
+        if (!simple_storage.has_empty_elements() && property_key.as_number() < simple_storage.array_like_size()) {
+            return true;
+        }
+    }
+    return Object::internal_has_property(property_key);
 }
 
 // NON-STANDARD: Used to reject deletes to ephemeral (non-configurable) length property
