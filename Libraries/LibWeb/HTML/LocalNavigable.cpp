@@ -1286,7 +1286,7 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View nam
         auto request_new_web_view = [&] {
             TokenizedFeature::Map empty_window_features;
             auto hints = WebViewHints::from_tokenised_features(window_features.has_value() ? *window_features : empty_window_features, traversable_navigable()->page());
-            return traversable_navigable()->page().client().page_did_request_new_web_view(activate_tab, hints, no_opener);
+            return traversable_navigable()->page().client().page_did_request_new_web_view(activate_tab, hints);
         };
 
         // --> If currentNavigable's active window does not have transient activation and the user agent has been configured to
@@ -1337,30 +1337,23 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View nam
             if (!name.equals_ignoring_ascii_case(u"_blank"sv))
                 target_name = Utf16String::from_utf16(name);
 
-            auto create_new_traversable_closure = [page = new_web_view.page, system_visibility_state = new_web_view.system_visibility_state, window_handle = move(new_web_view.window_handle), target_name](GC::Ptr<BrowsingContext> opener) -> GC::Ref<LocalTraversableNavigable> {
-                auto traversable = LocalTraversableNavigable::create_a_new_top_level_traversable(*page, opener, target_name, {}, system_visibility_state);
-                page->set_top_level_traversable(traversable);
-                traversable->set_window_handle(Utf16String::from_ascii_without_validation(window_handle.bytes()));
-
-                auto initial_history_entry = traversable->active_session_history_entry();
-                VERIFY(initial_history_entry);
-                page->client().page_did_create_top_level_traversable(
-                    traversable->id(),
-                    create_session_history_entry_descriptor(*initial_history_entry));
+            auto create_new_traversable = [&](GC::Ptr<BrowsingContext> opener) -> GC::Ref<LocalTraversableNavigable> {
+                auto traversable = LocalTraversableNavigable::create_a_new_top_level_traversable(*new_web_view.page, opener, target_name, {}, new_web_view.system_visibility_state);
+                new_web_view.page->set_top_level_traversable(traversable);
+                traversable->set_window_handle(Utf16String::from_ascii_without_validation(new_web_view.window_handle.bytes()));
                 return traversable;
             };
-            auto create_new_traversable = GC::create_function(heap(), move(create_new_traversable_closure));
 
             // 7. If noopener is true, then set chosen to the result of creating a new top-level traversable given null and targetName.
             if (no_opener == TokenizedFeature::NoOpener::Yes) {
-                chosen = create_new_traversable->function()(nullptr);
+                chosen = create_new_traversable(nullptr);
             }
 
             // 8. Otherwise:
             else {
                 // 1. Set chosen to the result of creating a new top-level traversable given currentNavigable's active browsing context, targetName, and currentNavigable.
                 // FIXME: "and currentNavigable", which is the openerNavigableForWebDriver parameter.
-                chosen = create_new_traversable->function()(active_browsing_context());
+                chosen = create_new_traversable(active_browsing_context());
 
                 // 2. If sandboxingFlagSet's sandboxed navigation browsing context flag is set,
                 //    then set chosen's active browsing context's one permitted sandboxed navigator to currentNavigable's active browsing context.
@@ -2318,19 +2311,53 @@ void LocalNavigable::populate_session_history_entry_document(
     NavigationParamsVariant navigation_params,
     ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type,
     bool allow_POST,
-    GC::Ptr<GC::Function<void(GC::Ptr<PopulateSessionHistoryEntryDocumentOutput>)>> completion_steps)
+    GC::Ptr<GC::Function<void(GC::Ptr<PopulateSessionHistoryEntryDocumentOutput>)>> completion_steps,
+    GC::Ptr<GC::Function<void(NavigationPopulationResult)>> response_steps)
 {
     // AD-HOC: Not in the spec but subsequent steps will fail if the navigable doesn't have an active window.
     if (!active_window()) {
         stop_or_resume_response_body_delivery(navigation_params);
+        if (response_steps) {
+            response_steps->function()({
+                .navigation_params = NavigationParamsNullOrError { "Navigable has no active window"_utf16 },
+                .redirected_url = {},
+                .classic_history_api_state = {},
+                .replacement_document_state = {},
+            });
+        }
         return;
     }
 
     auto navigation_timing_type = reload_pending ? Bindings::NavigationTimingType::Reload : Bindings::NavigationTimingType::BackForward;
-    auto received_navigation_params = GC::create_function(heap(), [this, url, navigation_id, navigation_timing_type, user_involvement, completion_steps, csp_navigation_type, source_snapshot_params](GC::Ref<InternalNavigationResult> result) {
+    auto received_navigation_params = GC::create_function(heap(), [this, url, navigation_id, navigation_timing_type, user_involvement, completion_steps, csp_navigation_type, source_snapshot_params, response_steps](GC::Ref<InternalNavigationResult> result) {
         // AD-HOC: Not in the spec but subsequent steps will fail if the navigable doesn't have an active window.
         if (!active_window()) {
             stop_or_resume_response_body_delivery(result->navigation_params);
+            if (response_steps) {
+                response_steps->function()({
+                    .navigation_params = NavigationParamsNullOrError { "Navigable has no active window"_utf16 },
+                    .redirected_url = {},
+                    .classic_history_api_state = {},
+                    .replacement_document_state = {},
+                });
+            }
+            return;
+        }
+
+        if (response_steps) {
+            auto& realm = active_window()->principal_realm();
+            create_navigation_params_descriptor(realm, result->navigation_params, GC::create_function(heap(), [result, response_steps](NavigationParamsVariantDescriptor params) {
+                Optional<SessionHistoryDocumentStateDescriptor> replacement_document_state;
+                if (result->replacement_document_state)
+                    replacement_document_state = create_session_history_document_state_descriptor(*result->replacement_document_state);
+                response_steps->function()({
+                    .navigation_params = move(params),
+                    .redirected_url = move(result->redirected_url),
+                    .classic_history_api_state = move(result->classic_history_api_state),
+                    .replacement_document_state = move(replacement_document_state),
+                    .resource_cleared = result->resource_cleared,
+                });
+            }));
             return;
         }
 
@@ -2905,7 +2932,7 @@ void LocalNavigable::begin_navigation(PreparedNavigation navigation)
     // 20. If url's scheme is "javascript", then:
     if (url.scheme() == "javascript"sv) {
         if (is_top_level_traversable())
-            active_browsing_context()->page().client().request_navigation_start(*this, active_document.url(), NavigationTarget::TopLevel, url, navigation_id, {});
+            active_browsing_context()->page().client().request_navigation_start(*this, NavigationTarget::TopLevel, url, navigation_id, {});
 
         // 1. Queue a global task on the navigation and traversal task source given navigable's active window to navigate to a javascript: URL given navigable, url, historyHandling, sourceSnapshotParams, initiatorOriginSnapshot, userInvolvement, cspNavigationType, initialInsertion, and navigationId.
         VERIFY(active_window());
@@ -3008,7 +3035,7 @@ void LocalNavigable::begin_navigation(PreparedNavigation navigation)
     park_navigation_for_population(navigation_id, move(navigation), continue_steps);
 
     auto target = is_top_level_traversable() ? NavigationTarget::TopLevel : NavigationTarget::IFrame;
-    active_browsing_context()->page().client().request_navigation_start(*this, active_document.url(), target, url, navigation_id, move(start_request));
+    active_browsing_context()->page().client().request_navigation_start(*this, target, url, navigation_id, move(start_request));
     return;
 }
 
@@ -3084,7 +3111,7 @@ void LocalNavigable::request_population_for_reconstructed_history_entry(Navigati
     });
 
     park_navigation_for_population(navigation_id, {}, continue_steps);
-    page().client().request_navigation_population(*this, active_document()->url(), NavigationTarget::IFrame, move(request));
+    page().client().request_navigation_population(*this, NavigationTarget::IFrame, move(request));
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigate-fragid

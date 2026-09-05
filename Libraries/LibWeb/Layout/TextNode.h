@@ -11,7 +11,6 @@
 #include <AK/Utf16String.h>
 #include <AK/Utf16View.h>
 #include <AK/Vector.h>
-#include <AK/WeakPtr.h>
 #include <LibGfx/TextLayout.h>
 #include <LibWeb/CSS/Enums.h>
 #include <LibWeb/DOM/Text.h>
@@ -20,35 +19,31 @@
 namespace Web::Layout {
 
 class GeneratedTextNode;
-class TextSliceNode;
 
 class TextNode : public Node {
 public:
-    TextNode(DOM::Document&, DOM::Text&);
+    TextNode(DOM::Document&, DOM::Text&, AttachToDOMNode = AttachToDOMNode::Yes);
     virtual ~TextNode() override;
 
     DOM::Text const& dom_node() const { return static_cast<DOM::Text const&>(*Node::dom_node()); }
     virtual DOM::Text const* dom_text() const { return &dom_node(); }
 
-    virtual size_t dom_start_offset() const { return 0; }
-
-    virtual size_t dom_length() const { return text().length_in_code_units(); }
-
     virtual Utf16String const& text() const { return dom_node().data(); }
 
     // Borrows the arena's rendered text until this node's content is republished or freed.
     Utf16View text_for_rendering() const;
+    Utf16String rendered_text_for_dom(bool collapse_whitespace) const;
+    RustFFI::FfiTextSourceRange word_range_at(size_t dom_offset) const;
     void invalidate_text_for_rendering();
 
-    void enroll_for_arena_text_content_sync() const;
-    void sync_text_content_to_arena() const;
+    // The returned views survive until the next DOM mutation.
+    RustFFI::FfiTextSource text_source() const;
 
     void set_needs_repaint(InvalidateDisplayList = InvalidateDisplayList::Yes) const;
 
     bool update_produces_line_box_fragment_when_empty_flag();
 
 protected:
-    TextNode(DOM::Document&, DOM::Text&, AttachToDOMNode, RustFFI::NodeKind = RustFFI::NodeKind::TextNode);
     TextNode(DOM::Document&, RustFFI::NodeKind);
 
     virtual GC::Ptr<DOM::Element const> parent_element_for_text_transform() const;
@@ -56,32 +51,6 @@ protected:
 
 private:
     virtual bool is_text_node() const final { return true; }
-
-    using RenderedTextEdit = RustFFI::RenderedTextEdit;
-
-    struct TextForRenderingCacheKey {
-        CSS::TextTransform text_transform { CSS::TextTransform::None };
-        CSS::WhiteSpaceCollapse white_space_collapse { CSS::WhiteSpaceCollapse::Collapse };
-        Optional<Utf16String> lang;
-        bool is_password_input { false };
-        size_t dom_start_offset { 0 };
-        size_t dom_length { 0 };
-
-        bool operator==(TextForRenderingCacheKey const&) const = default;
-    };
-
-    struct TextForRendering {
-        Utf16String text;
-        Vector<RenderedTextEdit> edits;
-    };
-
-    static TextForRendering apply_text_transform(Utf16String const&, CSS::TextTransform, Optional<Utf16View> const& locale);
-    TextForRenderingCacheKey create_text_for_rendering_cache_key() const;
-    TextForRendering compute_text_for_rendering(TextForRenderingCacheKey const&) const;
-    void ensure_text_content() const;
-
-    mutable Optional<TextForRenderingCacheKey> m_text_for_rendering_cache_key;
-    mutable bool m_enrolled_for_arena_text_content_sync { false };
 };
 
 class GeneratedTextNode final : public TextNode {
@@ -99,28 +68,6 @@ private:
     Utf16String m_text;
 };
 
-class TextSliceNode final : public TextNode {
-public:
-    TextSliceNode(DOM::Document&, DOM::Text&, AttachToDOMNode, size_t dom_start_offset, size_t dom_length);
-    virtual ~TextSliceNode() override;
-
-    virtual size_t dom_start_offset() const override { return m_dom_start_offset; }
-    virtual size_t dom_length() const override { return m_dom_length_in_code_units; }
-
-    // Only meaningful on a remainder slice. Returns the first-letter slice that renders the leading
-    // sub-range of the same DOM::Text, or nullptr if first-letter is not active for this DOM::Text.
-    TextSliceNode const* first_letter_slice() const { return m_first_letter_slice.ptr(); }
-
-    void set_first_letter_slice(TextSliceNode& slice) { m_first_letter_slice = slice; }
-
-private:
-    virtual bool is_text_slice_node() const override { return true; }
-
-    size_t m_dom_start_offset { 0 };
-    size_t m_dom_length_in_code_units { 0 };
-    WeakPtr<TextSliceNode> m_first_letter_slice;
-};
-
 // Classifies a code point for direction-run splitting during text chunking:
 // strong LTR/RTL, direction-neutral Common, or ContextDependent (resolved
 // from surrounding runs).
@@ -128,8 +75,5 @@ Gfx::GlyphRun::TextType text_type_for_code_point(u32 code_point);
 
 template<>
 inline bool Node::fast_is<TextNode>() const { return is_text_node(); }
-
-template<>
-inline bool Node::fast_is<TextSliceNode>() const { return is_text_slice_node(); }
 
 }

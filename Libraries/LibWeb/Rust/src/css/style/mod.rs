@@ -56,9 +56,12 @@ pub mod bridge;
 mod capacity;
 pub mod cascade;
 mod catalog;
+mod child_reactions;
 mod column;
 pub mod compiler;
 mod computed;
+mod custom_property_cascade;
+mod custom_property_environments;
 #[cfg(test)]
 mod differential_tests;
 pub mod exact_matcher;
@@ -242,6 +245,7 @@ use prefix::PrefixStateCache;
 use prefix::PrefixStates;
 use prefix::PrefixTransitionLookup;
 use program::CascadeLayerID;
+use program::CustomDeclaration;
 use program::DeclarationBlockID;
 use program::DeclaredProperty;
 use program::EntryID;
@@ -747,8 +751,10 @@ pub struct StyleEngine {
     #[cfg(feature = "style-recording")]
     recording_id: Option<u64>,
     memory: MemoryController,
-    parsed_substitution_memory: MemoryLease,
     counters: Counters,
+    /// The instrumentation state to restore after C++ materializes a record for verification.
+    computed_record_verification_counters: Option<Box<Counters>>,
+    computed_record_verification_pins: Vec<u64>,
     tree: StyleNodeTree,
     program: StyleSheetProgram,
     journal: NormalizationJournal,
@@ -759,6 +765,15 @@ pub struct StyleEngine {
     flushing_deferred_geometry_journal: bool,
     /// Exact element reactions retained across rootless flushes until a style root can consume them.
     deferred_element_style_inputs: Vec<NormalizedInput>,
+    /// Whether the deferred element style inputs are owed to the next transaction, as opposed to
+    /// held back by a flush without a document root.
+    deferred_element_style_inputs_are_pending: bool,
+    /// The nodes whose deferred element style input C++ recorded and the engine did not also
+    /// derive as a child reaction: what makes the next transaction a new pass of a style change
+    /// rather than one more generation of the last one.
+    externally_recorded_style_input_nodes: HashSet<StyleNodeID>,
+    /// Whether the last transaction taken planned nothing but derived child reactions.
+    last_transaction_only_derived_child_reactions: bool,
     deferred_element_style_input_memory: MemoryLease,
     /// Whether any tree input batch has crossed into the engine. A first batch consisting entirely
     /// of unique arrivals can install its final relation rows as one bulk load.
@@ -822,10 +837,40 @@ pub struct StyleEngine {
     /// computed half of the eventual base style record; custom properties and metadata remain
     /// separate inputs until that record is complete.
     computed_group_sets: ComputedGroupSets,
+    /// The stores behind the custom-property environments live records are published with.
+    custom_property_environments: custom_property_environments::CustomPropertyEnvironments,
+    /// The nodes whose engine-computed record substituted a custom property into a winner: what
+    /// C++ notes as reading custom properties when it installs the record.
+    nodes_with_substituted_records: HashSet<StyleNodeID>,
+    /// Whether the registrations used by this transaction differ from the preceding one. A
+    /// previously substituted record must then be recomputed by C++, which implements registered
+    /// custom properties, even when its cascade winners did not move.
+    custom_property_registrations_changed: bool,
     /// Pending selections for elements, and separately for the few pseudo-elements that hold one.
     /// Both are keyed by the element so that retiring it releases every selection by key.
     pending_element_style_computation_selections: HashMap<StyleNodeID, StyleComputationSelection>,
     pending_pseudo_style_computation_selections: HashMap<StyleNodeID, Vec<(u8, StyleComputationSelection)>>,
+    /// Records the engine derived for published reactions that C++ has not installed yet. Their
+    /// columns already moved so descendants in the same flush build on them; the cascade state
+    /// and answer consumption follow C++'s acknowledgement, and a discarded transaction reverts
+    /// the columns of the ones it never installed.
+    engine_computed_records_pending: Vec<publication::PendingEngineComputedRecord>,
+    /// First records derived earlier, by what they were derived from, for later elements alike.
+    /// Pseudo-element records the engine derived, by what they were derived from, for elements
+    /// alike in that to share.
+    /// Counts the style transactions taken; the winner rows record which one published them.
+    flush_stamp: u64,
+    /// Nodes whose style input the C++ computation has to settle: C++ recorded one, or their
+    /// parent's display moved, which their box-type transformation reads.
+    style_input_nodes_for_cpp: HashSet<StyleNodeID>,
+    /// Elements whose parent's display moved under their record this transaction: their
+    /// box-type transformation reads it, so their record is driven again in full.
+    parent_inputs_moved_nodes: HashSet<StyleNodeID>,
+    engine_pseudo_record_cache: HashMap<publication::PseudoCohortKey, computed::FinalStyleRecordID>,
+    engine_cold_record_cache: HashMap<publication::ColdRecordKey, publication::ColdRecord>,
+    engine_cold_record_donors: HashMap<publication::ColdRecordDonorKey, Vec<publication::ColdRecordDonor>>,
+    /// Which winner states the engine can compute records from, decided once per state.
+    engine_computable_states: HashMap<(u64, CascadeStateID, u64, u64), bool>,
     computed_group_set_memory: MemoryLease,
     custom_property_environment_memory: MemoryLease,
     computed_fixed_metadata_memory: MemoryLease,

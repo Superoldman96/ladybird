@@ -135,7 +135,6 @@ StringView Node::class_name() const
         LAYOUT_NODE_KIND_NAME_CASE(TextAreaBox)
         LAYOUT_NODE_KIND_NAME_CASE(TextInputBox)
         LAYOUT_NODE_KIND_NAME_CASE(TextNode)
-        LAYOUT_NODE_KIND_NAME_CASE(TextSliceNode)
         LAYOUT_NODE_KIND_NAME_CASE(VideoBox)
         LAYOUT_NODE_KIND_NAME_CASE(Viewport)
     case RustFFI::NodeKind::Unset:
@@ -577,6 +576,15 @@ bool NodeWithStyle::reinherit_owned_computed_values_from(CSS::StyleRecordID pare
     //     the parent.
     if (is_pseudo_element_principal_box())
         return false;
+    // A box generated for a pseudo-element's content (a marker's image box) was created
+    // on the pseudo-element's own record rather than on inherited values: it follows
+    // its principal box's record.
+    if (is_generated_for_pseudo_element() && !m_owned_computed_values) {
+        auto* parent = this->parent();
+        if (parent && parent->is_pseudo_element_principal_box() && parent->generated_for_pseudo_element() == generated_for_pseudo_element())
+            apply_style(parent_style_record_identity);
+        return false;
+    }
     auto parent_record_view = document().style_computer().computed_style_record_view(parent_style_record_identity);
     VERIFY(parent_record_view);
     CSS::ComputedValues::Builder builder(owned_computed_values());
@@ -709,8 +717,6 @@ void NodeWithStyle::set_computed_values(NonnullRefPtr<CSS::ComputedValues const>
         bump_fragment_cache_epoch_of_self_and_ancestors();
         RustFFI::layout_arena_reset_cached_intrinsic_sizes_of_self_and_ancestors(arena_handle(), slot_id(this));
     }
-
-    RustFFI::layout_arena_enroll_text_children_for_content_sync(arena_handle(), slot_id(this));
 }
 
 void NodeWithStyle::set_style_record_identity(CSS::StyleRecordID style_record_identity)
@@ -952,6 +958,7 @@ GC::Ptr<DOM::Element> Node::pseudo_element_generator()
 void Node::set_generated_for(CSS::PseudoElement type, DOM::Element& element)
 {
     static_assert(encode_generated_for(CSS::PseudoElement::After) == RustFFI::GENERATED_FOR_AFTER);
+    static_assert(encode_generated_for(CSS::PseudoElement::FirstLetter) == RustFFI::GENERATED_FOR_FIRST_LETTER);
     static_assert(encode_generated_for(CSS::PseudoElement::Marker) == RustFFI::GENERATED_FOR_MARKER);
     RustFFI::layout_arena_set_node_generated_for(arena_handle(), slot_id(this), encode_generated_for(type));
     m_pseudo_element_generator = element;
